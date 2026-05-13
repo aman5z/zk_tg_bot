@@ -7,6 +7,7 @@ Run: python bot.py
 """
 
 import asyncio
+import calendar as _cal
 import configparser
 import logging
 import os
@@ -15,9 +16,9 @@ from datetime import date, datetime, timedelta
 from io import BytesIO
 
 import pandas as pd
-from telegram import Update, Bot
-from telegram.ext import (Application, CommandHandler, MessageHandler,
-                           filters, ContextTypes)
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                           MessageHandler, filters, ContextTypes)
 from telegram.constants import ParseMode
 
 import mdb_reader
@@ -144,6 +145,151 @@ def _fmt_today(summary: dict, mode: str = 'full') -> str:
         f"<b>By Department:</b>\n" + '\n'.join(dept_lines)
     )
 
+# ─── Interactive calendar state (per chat) ────────────────────────────────────
+
+_cal_state: dict = {}   # chat_id → {'badge', 'name', 'dept', ['range_from']}
+
+# ─── Interactive calendar keyboard builder ────────────────────────────────────
+
+def _make_cal_keyboard(year: int, month: int, mode: str,
+                       badge: str, range_from: str = '') -> InlineKeyboardMarkup:
+    """
+    Build a month-grid InlineKeyboardMarkup.
+    mode: 'S'=single date, 'F'=range start, 'T'=range end
+    """
+    prev_y, prev_m = (year, month - 1) if month > 1 else (year - 1, 12)
+    next_y, next_m = (year, month + 1) if month < 12 else (year + 1, 1)
+    rf = range_from
+
+    def nav_cb(y, m):
+        return f'cal_nav:{y}:{m}:{mode}:{badge}:{rf}'
+
+    month_label = datetime(year, month, 1).strftime('%b %Y')
+
+    rows = [
+        [
+            InlineKeyboardButton('◀', callback_data=nav_cb(prev_y, prev_m)),
+            InlineKeyboardButton(month_label, callback_data='cal_noop'),
+            InlineKeyboardButton('▶', callback_data=nav_cb(next_y, next_m)),
+        ],
+        [InlineKeyboardButton(d, callback_data='cal_noop')
+         for d in ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']],
+    ]
+
+    first_col  = datetime(year, month, 1).weekday()
+    total_days = _cal.monthrange(year, month)[1]
+    week = [InlineKeyboardButton(' ', callback_data='cal_noop')] * first_col
+
+    for day in range(1, total_days + 1):
+        date_str = f'{year:04d}-{month:02d}-{day:02d}'
+        week.append(InlineKeyboardButton(
+            str(day),
+            callback_data=f'cal_day:{date_str}:{mode}:{badge}:{rf}',
+        ))
+        if len(week) == 7:
+            rows.append(week)
+            week = []
+
+    if week:
+        week += [InlineKeyboardButton(' ', callback_data='cal_noop')] * (7 - len(week))
+        rows.append(week)
+
+    rows.append([InlineKeyboardButton('❌ Cancel', callback_data='att_cancel')])
+    return InlineKeyboardMarkup(rows)
+
+# ─── Interactive calendar result formatters ───────────────────────────────────
+
+def _fmt_day_punches(badge: str, name: str, dept: str, date_str: str) -> str:
+    """Format punch records for a single day."""
+    try:
+        d = datetime.strptime(date_str, '%Y-%m-%d').date()
+        punches = mdb_reader.get_employee_punches(badge, d, d)
+        day_label = d.strftime('%A %d %b %Y')
+    except Exception as exc:
+        return f'❌ Error fetching punches: {str(exc)[:100]}'
+
+    lines = [
+        f'👤 <b>{name}</b> ({badge}) — {dept}',
+        f'📅 {day_label}',
+        '',
+    ]
+    if not punches:
+        lines.append('❌ No punches recorded.')
+    else:
+        lines.append(f'✅ <b>{len(punches)} punch(es):</b>')
+        for p in punches:
+            dev = p.get('device') or '?'
+            lines.append(f"  🕐 {p['time']}  (<code>{dev}</code>)")
+        lines.append('')
+        if len(punches) >= 2:
+            lines.append(f"⏩ First: {punches[0]['time']}   Last: {punches[-1]['time']}")
+    return '\n'.join(lines)
+
+def _fmt_range_punches(badge: str, name: str, dept: str,
+                       d_from_str: str, d_to_str: str) -> str:
+    """Format punch records for a date range."""
+    try:
+        d_from  = datetime.strptime(d_from_str, '%Y-%m-%d').date()
+        d_to    = datetime.strptime(d_to_str,   '%Y-%m-%d').date()
+        punches = mdb_reader.get_employee_punches(badge, d_from, d_to)
+    except Exception as exc:
+        return f'❌ Error fetching punches: {str(exc)[:100]}'
+
+    total_days = (d_to - d_from).days + 1
+    by_date: dict = {}
+    for p in punches:
+        key = p['date'].strftime('%Y-%m-%d')
+        by_date.setdefault(key, []).append(p)
+
+    header = [
+        f'👤 <b>{name}</b> ({badge}) — {dept}',
+        f'📅 {d_from.strftime("%d %b")} – {d_to.strftime("%d %b %Y")}  ({total_days} days)',
+        '',
+    ]
+
+    present = absent = weekend = 0
+    lines   = []
+    compact = total_days > 14
+    d = d_from
+    while d <= d_to:
+        dow        = d.weekday()
+        day_key    = d.strftime('%Y-%m-%d')
+        day_recs   = by_date.get(day_key, [])
+        is_weekend = dow in (4, 5)  # Fri/Sat = weekend in Middle East
+
+        if is_weekend:
+            weekend += 1
+        else:
+            if day_recs:
+                present += 1
+            else:
+                absent += 1
+
+        if compact:
+            if day_recs:
+                t_in  = day_recs[0]['time']
+                t_out = day_recs[-1]['time'] if len(day_recs) > 1 else '—     '
+                lines.append(f"{d.strftime('%d %b %a')}  {t_in}  {t_out}  ({len(day_recs)})")
+            elif not is_weekend:
+                lines.append(f"{d.strftime('%d %b %a')}  —         —         0")
+        else:
+            day_str = d.strftime('%a %d %b')
+            if is_weekend:
+                lines.append(f'📆 {day_str}  🏖 Weekend')
+            elif not day_recs:
+                lines.append(f'📆 {day_str}  ❌  No punches')
+            elif len(day_recs) == 1:
+                lines.append(f"📆 {day_str}  ✅  IN {day_recs[0]['time']}  (1 punch — no out)")
+            else:
+                lines.append(f"📆 {day_str}  ✅  IN {day_recs[0]['time']}"
+                             f"  OUT {day_recs[-1]['time']}  ({len(day_recs)} punches)")
+        d += timedelta(days=1)
+
+    summary = f'\nSummary: {present} present, {absent} absent'
+    if weekend:
+        summary += f', {weekend} weekend'
+    return '\n'.join(header + lines + [summary])
+
 # ─── Handlers ─────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -173,7 +319,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "<b>Employee</b>\n"
         "/search &lt;name or badge&gt; — find employee\n"
         "/punches &lt;badge&gt; — today's punches\n"
-        "/calendar &lt;badge&gt; [YYYY-MM] — monthly calendar\n\n"
+        "/calendar &lt;badge&gt; — interactive date/range picker\n"
+        "/calendar &lt;badge&gt; YYYY-MM — static monthly calendar\n\n"
         "<b>Devices</b>\n"
         "/devices — all device status\n"
         "/clocksync — sync all device clocks\n"
@@ -429,28 +576,190 @@ async def cmd_punches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f'❌ {e}')
 
 async def cmd_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Usage: /calendar <badge> [YYYY-MM]"""
+    """Usage: /calendar <badge> [YYYY-MM]
+    Without YYYY-MM → interactive date/range picker with inline keyboard.
+    With YYYY-MM → static emoji-grid calendar (existing behaviour).
+    """
     if not _allowed(update):
         return await _deny(update)
     if not ctx.args:
         await update.message.reply_text(
-            'Usage: /calendar &lt;badge&gt; [YYYY-MM]\n'
-            'Example: /calendar 1024 2026-05', parse_mode=ParseMode.HTML)
+            'Usage:\n'
+            '  /calendar &lt;badge&gt; — interactive date/range picker\n'
+            '  /calendar &lt;badge&gt; YYYY-MM — static monthly calendar\n'
+            'Example: /calendar 1024', parse_mode=ParseMode.HTML)
         return
     badge = ctx.args[0].strip()
-    month_str = ctx.args[1] if len(ctx.args) > 1 else date.today().strftime('%Y-%m')
-    try:
-        year, month = map(int, month_str.split('-'))
-    except ValueError:
-        await update.message.reply_text('❌ Month format: YYYY-MM')
+
+    # ── Static monthly calendar (legacy, with explicit month) ──────────
+    if len(ctx.args) > 1:
+        month_str = ctx.args[1]
+        try:
+            year, month = map(int, month_str.split('-'))
+        except ValueError:
+            await update.message.reply_text('❌ Month format: YYYY-MM')
+            return
+        await update.message.reply_text('⏳ Building calendar...')
+        try:
+            cal  = mdb_reader.get_employee_calendar(badge, year, month)
+            text = _fmt_calendar(cal)
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            await update.message.reply_text(f'❌ {e}')
         return
-    await update.message.reply_text('⏳ Building calendar...')
+
+    # ── Interactive calendar picker ─────────────────────────────────────
     try:
-        cal = mdb_reader.get_employee_calendar(badge, year, month)
-        text = _fmt_calendar(cal)
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        emps = mdb_reader.search_employee(badge)
+        if not emps:
+            await update.message.reply_text(f'❌ No employee found for badge "{badge}"')
+            return
+        emp  = emps[0]
+        name = emp['name']
+        dept = emp['dept']
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
+        return
+
+    chat_id = str(update.effective_chat.id)
+    _cal_state[chat_id] = {'badge': badge, 'name': name, 'dept': dept}
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('📅 Single Date', callback_data=f'att_mode:S:{badge}'),
+            InlineKeyboardButton('📆 Date Range',  callback_data=f'att_mode:F:{badge}'),
+        ],
+        [InlineKeyboardButton('❌ Cancel', callback_data='att_cancel')],
+    ])
+    await update.message.reply_text(
+        f'👤 <b>{name}</b> ({badge}) — {dept}\nChoose a date option:',
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+async def callback_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle all inline keyboard callbacks for the interactive calendar."""
+    query   = update.callback_query
+    await query.answer()
+
+    if not _allowed(update):
+        return
+
+    data    = query.data or ''
+    chat_id = str(update.effective_chat.id)
+
+    # ── No-op (header labels, empty cells) ─────────────────────────────
+    if data == 'cal_noop':
+        return
+
+    # ── Cancel ──────────────────────────────────────────────────────────
+    if data == 'att_cancel':
+        _cal_state.pop(chat_id, None)
+        await query.edit_message_text('❌ Cancelled.')
+        return
+
+    # ── Mode selection (Single / Range-start) ───────────────────────────
+    if data.startswith('att_mode:'):
+        # format: att_mode:{S|F}:{badge}
+        parts = data.split(':', 2)
+        if len(parts) < 3:
+            return
+        mode  = parts[1]
+        badge = parts[2]
+        st    = _cal_state.get(chat_id, {})
+        name  = st.get('name', badge)
+        today = date.today()
+        kb    = _make_cal_keyboard(today.year, today.month, mode, badge)
+        title = (f'📅 <b>Select date</b>\n👤 {name} ({badge})'
+                 if mode == 'S' else
+                 f'📅 <b>Select start date</b>\n👤 {name} ({badge})')
+        await query.edit_message_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    # ── Month navigation ─────────────────────────────────────────────────
+    if data.startswith('cal_nav:'):
+        # format: cal_nav:{year}:{month}:{mode}:{badge}:{range_from}
+        parts = data.split(':')
+        if len(parts) < 6:
+            return
+        try:
+            year  = int(parts[1])
+            month = int(parts[2])
+        except ValueError:
+            return
+        mode       = parts[3]
+        badge      = parts[4]
+        range_from = parts[5] if len(parts) > 5 else ''
+        st   = _cal_state.get(chat_id, {})
+        name = st.get('name', badge)
+        kb   = _make_cal_keyboard(year, month, mode, badge, range_from)
+        if mode == 'S':
+            title = f'📅 <b>Select date</b>\n👤 {name} ({badge})'
+        elif mode == 'F':
+            title = f'📅 <b>Select start date</b>\n👤 {name} ({badge})'
+        else:
+            title = (f'📅 <b>Select end date</b>\n👤 {name} ({badge})\n'
+                     f'⏩ From: {range_from}')
+        await query.edit_message_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    # ── Day selection ────────────────────────────────────────────────────
+    if data.startswith('cal_day:'):
+        # format: cal_day:{YYYY-MM-DD}:{mode}:{badge}:{range_from}
+        parts = data.split(':')
+        if len(parts) < 5:
+            return
+        selected_date = parts[1]
+        mode          = parts[2]
+        badge         = parts[3]
+        range_from    = parts[4] if len(parts) > 4 else ''
+        st   = _cal_state.get(chat_id, {})
+        name = st.get('name', badge)
+        dept = st.get('dept', '')
+
+        if mode == 'S':
+            # Single day — fetch and display
+            _cal_state.pop(chat_id, None)
+            await query.edit_message_text(
+                f'⏳ Fetching attendance for {name} — {selected_date}…',
+                parse_mode=ParseMode.HTML)
+            result = _fmt_day_punches(badge, name, dept, selected_date)
+            await _edit_or_followup(query, update, result)
+
+        elif mode == 'F':
+            # Got range start — show calendar for end date
+            year  = int(selected_date[:4])
+            month = int(selected_date[5:7])
+            _cal_state[chat_id] = {**st, 'range_from': selected_date}
+            kb    = _make_cal_keyboard(year, month, 'T', badge, selected_date)
+            title = (f'📅 <b>Select end date</b>\n👤 {name} ({badge})\n'
+                     f'⏩ From: {selected_date}')
+            await query.edit_message_text(title, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+        elif mode == 'T':
+            # Got range end — fetch and display
+            _cal_state.pop(chat_id, None)
+            d_from_str = range_from
+            d_to_str   = selected_date
+            try:
+                if (datetime.strptime(d_from_str, '%Y-%m-%d') >
+                        datetime.strptime(d_to_str, '%Y-%m-%d')):
+                    d_from_str, d_to_str = d_to_str, d_from_str
+            except ValueError:
+                pass
+            await query.edit_message_text(
+                f'⏳ Fetching attendance for {name} — {d_from_str} to {d_to_str}…',
+                parse_mode=ParseMode.HTML)
+            result = _fmt_range_punches(badge, name, dept, d_from_str, d_to_str)
+            await _edit_or_followup(query, update, result)
+        return
+
+async def _edit_or_followup(query, update: Update, text: str):
+    """Edit the callback message with text; if too long, send follow-up chunks."""
+    chunks = _split(text)
+    await query.edit_message_text(chunks[0], parse_mode=ParseMode.HTML)
+    for chunk in chunks[1:]:
+        await update.effective_chat.send_message(chunk, parse_mode=ParseMode.HTML)
 
 # ── Device commands ───────────────────────────────────────────────────────────
 
@@ -756,6 +1065,7 @@ def main():
     for cmd, handler in handlers:
         app.add_handler(CommandHandler(cmd, handler))
 
+    app.add_handler(CallbackQueryHandler(callback_calendar))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
     logger.info('Bot running. Press Ctrl+C to stop.')
