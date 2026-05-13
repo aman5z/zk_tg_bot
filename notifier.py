@@ -11,6 +11,7 @@ import logging
 import time
 from datetime import datetime, date
 from io import BytesIO
+from typing import Optional
 
 from telegram import Bot
 from telegram.error import TelegramError
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ─── Send helpers ─────────────────────────────────────────────────────────────
 
 def _chat_id() -> str:
-    return settings._cfg.get('telegram', 'chat_id', fallback='').strip()
+    return settings.get_chat_id()
 
 
 async def _send(bot: Bot, text: str, parse_mode: str = 'HTML'):
@@ -137,8 +138,7 @@ _last_device_status: dict = {}   # ip → online bool
 
 async def check_device_status_changes(bot: Bot):
     """Send alert if any device changes online/offline state."""
-    if not settings._cfg.getboolean('notifications', 'notify_device_status',
-                                    fallback=True):
+    if not settings.get_notify_device_status():
         return
     try:
         statuses = zk_devices.get_device_status()
@@ -168,7 +168,7 @@ async def check_device_status_changes(bot: Bot):
 
 # ─── Live punch notifications ─────────────────────────────────────────────────
 
-_last_live_punch_ts: datetime = None   # timestamp of the last punch we notified about
+_last_live_punch_ts: Optional[datetime] = None   # timestamp of the last punch we notified about
 
 
 async def check_live_punches(bot: Bot):

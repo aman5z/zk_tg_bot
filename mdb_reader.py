@@ -156,6 +156,11 @@ def refresh_dept_cache():
     _dept_cache = {}
     _get_dept_map()
 
+
+def get_dept_map() -> dict:
+    """Public wrapper around the cached department map."""
+    return _get_dept_map()
+
 # ─── Employees ────────────────────────────────────────────────────────────────
 
 def get_employees(active_only: bool = True) -> list:

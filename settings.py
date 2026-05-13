@@ -16,8 +16,11 @@ _cfg.read(_CFG_PATH)
 
 
 def _save():
-    with open(_CFG_PATH, 'w') as f:
-        _cfg.write(f)
+    try:
+        with open(_CFG_PATH, 'w') as f:
+            _cfg.write(f)
+    except OSError as e:
+        logger.error(f"Failed to persist settings to {_CFG_PATH}: {e}")
 
 
 def _ensure(section: str):
@@ -156,6 +159,16 @@ def set_live_punches(val: bool):
     _ensure('notifications')
     _cfg['notifications']['notify_punches'] = '1' if val else '0'
     _save()
+
+
+# ─── Read-only telegram/device helpers for notifier ──────────────────────────
+
+def get_chat_id() -> str:
+    return _cfg.get('telegram', 'chat_id', fallback='').strip()
+
+
+def get_notify_device_status() -> bool:
+    return _cfg.getboolean('notifications', 'notify_device_status', fallback=True)
 
 
 # ─── Summary helpers ──────────────────────────────────────────────────────────

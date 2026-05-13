@@ -27,6 +27,7 @@ import notifier
 import settings
 import report_builder
 from report_builder import TEMPLATES as REPORT_TEMPLATES, DEPT_ORDER
+from settings import _DAY_NAMES
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -639,14 +640,16 @@ async def cmd_livepunches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 _edit_state: dict = {}   # chat_id → {'ctx': 'report'|'daily', 'awaiting': None|'time'|'exc'}
 
 _ALL_FORMATS = ['xlsx', 'png', 'pdf']
-_DAY_NAMES   = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu',
-                4: 'Fri', 5: 'Sat', 6: 'Sun'}
+# Telegram callback_data has a 64-byte limit.
+# Prefix like 'er:dept:' = 8 chars, leaving 56 for dept name.
+# We cap at 50 chars to be safe.
+_MAX_DEPT_CALLBACK_LEN = 50
 
 
 def _get_dept_list() -> list:
     """Return all known departments, priority first, then rest alphabetically."""
     try:
-        dept_map = mdb_reader._get_dept_map()
+        dept_map = mdb_reader.get_dept_map()
         all_depts = sorted({v for v in dept_map.values() if v})
     except Exception:
         all_depts = []
@@ -736,7 +739,7 @@ def _dept_menu_kb(ctx_key: str, current: str) -> InlineKeyboardMarkup:
         checked = dept.upper() in selected
         dept_btns.append(InlineKeyboardButton(
             f"{'✅' if checked else '⬜'} {dept}",
-            callback_data=f'{ctx_key}:dept:{dept[:18]}',  # 64-byte limit safety
+            callback_data=f'{ctx_key}:dept:{dept[:_MAX_DEPT_CALLBACK_LEN]}',
         ))
     for i in range(0, len(dept_btns), 2):
         rows.append(dept_btns[i:i + 2])

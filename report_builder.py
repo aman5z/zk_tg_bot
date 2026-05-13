@@ -168,7 +168,7 @@ def build_png(rows: List[Dict], title: str = '', template: str = 'default') -> B
     ax.axis('off')
 
     if not rows:
-        ax.text(0.5, 0.5, 'No absences today 🎉', ha='center', va='center',
+        ax.text(0.5, 0.5, 'No absences today — All present!', ha='center', va='center',
                 fontsize=14, transform=ax.transAxes)
     else:
         col_labels = ['Badge', 'Name', 'Department']
@@ -220,8 +220,12 @@ _ROWS_PER_PAGE = 48
 
 def build_pdf(rows: List[Dict], title: str = '', template: str = 'default') -> BytesIO:
     tpl = TEMPLATES.get(template, TEMPLATES['default'])
-    pages = [rows[i:i + _ROWS_PER_PAGE]
-             for i in range(0, max(1, len(rows)), _ROWS_PER_PAGE)]
+    # When rows is empty produce a single empty page; otherwise paginate.
+    if rows:
+        pages = [rows[i:i + _ROWS_PER_PAGE]
+                 for i in range(0, len(rows), _ROWS_PER_PAGE)]
+    else:
+        pages = [[]]
 
     buf = BytesIO()
     with PdfPages(buf) as pdf:
@@ -263,7 +267,7 @@ def build_pdf(rows: List[Dict], title: str = '', template: str = 'default') -> B
                     for i in range(n + 1):
                         tbl[i, j].set_width(w)
             else:
-                ax.text(0.5, 0.5, 'No absences today 🎉', ha='center', va='center',
+                ax.text(0.5, 0.5, 'No absences today — All present!', ha='center', va='center',
                         fontsize=14, transform=ax.transAxes)
 
             if page_title:
