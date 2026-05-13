@@ -62,21 +62,28 @@ def get_device_status() -> list:
     for d in devices:
         status = {'name': d['name'], 'ip': d['ip'], 'online': False,
                   'users': None, 'logs': None, 'firmware': None, 'time': None}
+        conn = None
         try:
             conn, zk = _connect(d)
-            info = conn.get_device_info()
-            status['online']   = True
-            status['users']    = getattr(info, 'users', None)
-            status['logs']     = getattr(info, 'records', None)
-            status['firmware'] = getattr(info, 'firmware_version', None)
-            status['time']     = conn.get_time().strftime('%H:%M:%S') if conn else None
+            status['online'] = True
             try:
-                conn.enable_device()
-                conn.disconnect()
+                users = conn.get_users()
+                status['users'] = len(users)
+            except Exception:
+                pass
+            try:
+                status['time'] = conn.get_time().strftime('%H:%M:%S')
             except Exception:
                 pass
         except Exception as e:
             status['error'] = str(e)
+        finally:
+            if conn:
+                try:
+                    conn.enable_device()
+                    conn.disconnect()
+                except Exception:
+                    pass
         result.append(status)
     return result
 
@@ -105,6 +112,26 @@ def sync_clocks() -> list:
     return results
 
 # ─── Reboot ───────────────────────────────────────────────────────────────────
+
+def reboot_all() -> list:
+    """Reboot all configured devices."""
+    devices = _get_devices()
+    results = []
+    for d in devices:
+        conn = None
+        try:
+            conn, zk = _connect(d)
+            conn.restart()
+            results.append({'ok': True, 'name': d['name'], 'ip': d['ip']})
+        except Exception as e:
+            results.append({'ok': False, 'name': d['name'], 'ip': d['ip'], 'error': str(e)})
+        finally:
+            if conn:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
+    return results
 
 def reboot_device(ip: str) -> dict:
     """Reboot a single device by IP."""
