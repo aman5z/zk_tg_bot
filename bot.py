@@ -24,6 +24,9 @@ from telegram.constants import ParseMode
 import mdb_reader
 import zk_devices
 import notifier
+import settings
+import report_builder
+from report_builder import TEMPLATES as REPORT_TEMPLATES, DEPT_ORDER
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -311,11 +314,12 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/late — late arrivals today\n"
         "/whoisin — currently inside building\n"
         "/feed — last 20 punches\n"
+        "/latest — latest 2 MDB punches + device times\n"
         "/week — this week summary\n"
         "/month — monthly dept summary\n"
         "/topabsent — most absent this month\n"
         "/history &lt;DD/MM/YYYY&gt; &lt;DD/MM/YYYY&gt; — range report\n"
-        "/report — send absent XLSX\n\n"
+        "/report — send absent report (XLSX/PNG/PDF)\n\n"
         "<b>Employee</b>\n"
         "/search &lt;name or badge&gt; — find employee\n"
         "/punches &lt;badge&gt; — today's punches\n"
@@ -328,6 +332,10 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/usersync — sync users across devices\n"
         "/adduser &lt;badge&gt; &lt;name&gt; — add user to all devices\n"
         "/unknown — users on devices not in MDB\n\n"
+        "<b>Settings</b>\n"
+        "/livepunches — toggle live punch notifications on/off\n"
+        "/editreport — configure on-demand /report settings\n"
+        "/editdaily — configure scheduled daily report settings\n\n"
         "<b>Database</b>\n"
         "/stats — MDB stats\n"
         "/mdbinfo — MDB path + file info\n"
@@ -514,15 +522,560 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f'❌ {e}')
 
 async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Send today's absent list as XLSX."""
+    """Send today's absent list in configured format(s)."""
     if not _allowed(update):
         return await _deny(update)
     await update.message.reply_text('⏳ Building report...')
     try:
-        bot = ctx.bot
-        await notifier.send_daily_report(bot)
+        summary = mdb_reader.get_today_summary()
+        absent  = summary['absent']
+        today   = date.today()
+
+        if not absent:
+            await update.message.reply_text(
+                f"✅ No absences today ({summary['date']}). All staff present!")
+            return
+
+        depts    = settings.get_report_departments()
+        formats  = settings.get_report_formats()
+        template = settings.get_report_template()
+
+        files = report_builder.build_absent_report(
+            absent=absent,
+            report_date=today,
+            departments=depts,
+            formats=formats,
+            template=template,
+        )
+        caption = f'Absent list — {today.strftime("%d/%m/%Y")}  ({summary["absent_count"]} absent)'
+        for fmt_key, (buf, filename) in files.items():
+            if fmt_key == 'png':
+                buf.seek(0)
+                await update.message.reply_photo(photo=buf, caption=caption)
+            else:
+                buf.seek(0)
+                await update.message.reply_document(document=buf, filename=filename,
+                                                    caption=caption)
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
+
+# ── /latest — latest MDB punches + live device times ─────────────────────────
+
+async def cmd_latest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show the 2 most recent MDB punches and live device clock times."""
+    if not _allowed(update):
+        return await _deny(update)
+    await update.message.reply_text('⏳ Fetching...')
+    lines = ['🔄 <b>Latest MDB Activity</b>\n']
+
+    # — Latest 2 punches from MDB —
+    try:
+        punches = mdb_reader.get_latest_punches(n=2, days_back=3)
+        if punches:
+            lines.append('📌 <b>Last 2 Punches (MDB):</b>')
+            for p in punches:
+                dev = p.get('device') or '?'
+                date_label = (p['date'].strftime('%d/%m/%Y')
+                              if p['date'] != date.today() else 'Today')
+                lines.append(
+                    f"  🕐 {date_label} {p['time']}"
+                    f"  👤 {p['name']}  🏷 {p['badge']}"
+                    f"  🏢 {p['dept']}"
+                    f"\n     📡 Device: <code>{dev}</code>"
+                )
+        else:
+            lines.append('📌 No recent punches found.')
+    except Exception as e:
+        lines.append(f'📌 Punch fetch error: {e}')
+
+    # — MDB file modification time —
+    try:
+        info = mdb_reader.get_mdb_info()
+        if info.get('last_modified'):
+            lines.append(f"\n📁 <b>MDB Last Modified:</b> {info['last_modified']}")
+    except Exception:
+        pass
+
+    # — Live device times —
+    lines.append('\n📡 <b>Device Times (Live):</b>')
+    try:
+        statuses = zk_devices.get_device_status()
+        for s in statuses:
+            icon = '🟢' if s['online'] else '🔴'
+            if s['online'] and s.get('time'):
+                lines.append(f"  {icon} {s['name']} ({s['ip']}) — 🕐 {s['time']}")
+            elif s['online']:
+                lines.append(f"  {icon} {s['name']} ({s['ip']}) — online")
+            else:
+                lines.append(f"  {icon} {s['name']} ({s['ip']}) — offline")
+    except Exception as e:
+        lines.append(f'  ⚠️ Device check failed: {e}')
+
+    await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+
+
+# ── /livepunches — toggle live punch notifications ────────────────────────────
+
+async def cmd_livepunches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Toggle live punch notifications on or off."""
+    if not _allowed(update):
+        return await _deny(update)
+    current = settings.get_live_punches()
+    new_val = not current
+    settings.set_live_punches(new_val)
+    icon   = '🟢' if new_val else '🔴'
+    state  = 'ENABLED' if new_val else 'DISABLED'
+    await update.message.reply_text(
+        f"{icon} <b>Live Punch Notifications {state}</b>\n\n"
+        f"{'Every new punch will be sent as a Telegram message.' if new_val else 'No punch notifications until re-enabled.'}\n"
+        f"Use /livepunches again to toggle.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+# ── Edit settings helpers ─────────────────────────────────────────────────────
+
+# Per-chat state for edit UI: 'awaiting' is set when we wait for a text reply
+_edit_state: dict = {}   # chat_id → {'ctx': 'report'|'daily', 'awaiting': None|'time'|'exc'}
+
+_ALL_FORMATS = ['xlsx', 'png', 'pdf']
+_DAY_NAMES   = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu',
+                4: 'Fri', 5: 'Sat', 6: 'Sun'}
+
+
+def _get_dept_list() -> list:
+    """Return all known departments, priority first, then rest alphabetically."""
+    try:
+        dept_map = mdb_reader._get_dept_map()
+        all_depts = sorted({v for v in dept_map.values() if v})
+    except Exception:
+        all_depts = []
+    # Sort by priority
+    ordered = [d for d in DEPT_ORDER if any(d == x.upper() for x in all_depts)]
+    rest    = [d for d in all_depts if d.upper() not in DEPT_ORDER]
+    return ordered + rest
+
+
+def _fmt_report_panel() -> tuple:
+    """Return (text, InlineKeyboardMarkup) for the /editreport panel."""
+    depts    = settings.get_report_departments()
+    fmts     = settings.get_report_formats()
+    tpl      = settings.get_report_template()
+    tpl_label = REPORT_TEMPLATES.get(tpl, {}).get('label', tpl)
+
+    text = (
+        f"📊 <b>On-Demand /report Settings</b>\n\n"
+        f"📁 Departments: <b>{depts}</b>\n"
+        f"📄 Formats: <b>{fmts.upper()}</b>\n"
+        f"🎨 Template: <b>{tpl_label}</b>"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('📁 Departments', callback_data='er:dept_menu'),
+            InlineKeyboardButton('📄 Format',      callback_data='er:fmt_menu'),
+        ],
+        [
+            InlineKeyboardButton('🎨 Template',    callback_data='er:tmpl_menu'),
+        ],
+        [InlineKeyboardButton('✅ Done', callback_data='er:done')],
+    ])
+    return text, kb
+
+
+def _fmt_daily_panel() -> tuple:
+    """Return (text, InlineKeyboardMarkup) for the /editdaily panel."""
+    depts   = settings.get_daily_departments()
+    fmts    = settings.get_daily_formats()
+    tpl     = settings.get_daily_template()
+    tpl_lbl = REPORT_TEMPLATES.get(tpl, {}).get('label', tpl)
+    exc     = settings.get_daily_exclude_badges() or '—'
+
+    text = (
+        f"⏰ <b>Daily Report Settings</b>\n\n"
+        f"🕐 Time: <b>{settings.daily_time_label()}</b>\n"
+        f"📅 Days: <b>{settings.daily_days_label()}</b>\n"
+        f"📁 Departments: <b>{depts}</b>\n"
+        f"📄 Formats: <b>{fmts.upper()}</b>\n"
+        f"🎨 Template: <b>{tpl_lbl}</b>\n"
+        f"🚫 Extra excluded badges: <b>{exc}</b>"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('🕐 Time',        callback_data='ed:time'),
+            InlineKeyboardButton('📅 Days',        callback_data='ed:days_menu'),
+        ],
+        [
+            InlineKeyboardButton('📁 Departments', callback_data='ed:dept_menu'),
+            InlineKeyboardButton('📄 Format',      callback_data='ed:fmt_menu'),
+        ],
+        [
+            InlineKeyboardButton('🎨 Template',    callback_data='ed:tmpl_menu'),
+            InlineKeyboardButton('🚫 Exclusions',  callback_data='ed:exc'),
+        ],
+        [InlineKeyboardButton('✅ Done', callback_data='ed:done')],
+    ])
+    return text, kb
+
+
+def _dept_menu_kb(ctx_key: str, current: str) -> InlineKeyboardMarkup:
+    """Build department selection keyboard for 'er' or 'ed' context."""
+    selected = (set() if current.strip().upper() == 'ALL'
+                else {d.strip().upper() for d in current.split(',') if d.strip()})
+    depts = _get_dept_list()
+
+    rows = []
+    # ALL toggle row
+    all_checked = not selected
+    rows.append([InlineKeyboardButton(
+        f"{'✅' if all_checked else '⬜'} ALL",
+        callback_data=f'{ctx_key}:dept:ALL',
+    )])
+    # Individual dept rows (2 per row)
+    dept_btns = []
+    for dept in depts:
+        checked = dept.upper() in selected
+        dept_btns.append(InlineKeyboardButton(
+            f"{'✅' if checked else '⬜'} {dept}",
+            callback_data=f'{ctx_key}:dept:{dept[:18]}',  # 64-byte limit safety
+        ))
+    for i in range(0, len(dept_btns), 2):
+        rows.append(dept_btns[i:i + 2])
+
+    rows.append([InlineKeyboardButton('← Back', callback_data=f'{ctx_key}:back')])
+    return InlineKeyboardMarkup(rows)
+
+
+def _fmt_menu_kb(ctx_key: str, current: str) -> InlineKeyboardMarkup:
+    selected = {f.strip().lower() for f in current.split(',') if f.strip()}
+    rows = []
+    fmt_btns = []
+    for fmt in _ALL_FORMATS:
+        checked = fmt in selected
+        fmt_btns.append(InlineKeyboardButton(
+            f"{'✅' if checked else '⬜'} {fmt.upper()}",
+            callback_data=f'{ctx_key}:fmt:{fmt}',
+        ))
+    rows.append(fmt_btns)
+    # ALL shortcut
+    rows.append([InlineKeyboardButton(
+        f"{'✅' if selected >= set(_ALL_FORMATS) else '⬜'} ALL",
+        callback_data=f'{ctx_key}:fmt:all',
+    )])
+    rows.append([InlineKeyboardButton('← Back', callback_data=f'{ctx_key}:back')])
+    return InlineKeyboardMarkup(rows)
+
+
+def _tmpl_menu_kb(ctx_key: str, current: str) -> InlineKeyboardMarkup:
+    rows = []
+    for key, info in REPORT_TEMPLATES.items():
+        checked = key == current
+        rows.append([InlineKeyboardButton(
+            f"{'✅' if checked else '⬜'} {info['label']}",
+            callback_data=f'{ctx_key}:tmpl:{key}',
+        )])
+    rows.append([InlineKeyboardButton('← Back', callback_data=f'{ctx_key}:back')])
+    return InlineKeyboardMarkup(rows)
+
+
+def _days_menu_kb(current: str) -> InlineKeyboardMarkup:
+    selected = {int(d.strip()) for d in current.split(',')
+                if d.strip().isdigit()}
+    rows = []
+    btns = []
+    for day_num, day_name in _DAY_NAMES.items():
+        checked = day_num in selected
+        btns.append(InlineKeyboardButton(
+            f"{'✅' if checked else '⬜'} {day_name}",
+            callback_data=f'ed:day:{day_num}',
+        ))
+    # 3 per row
+    for i in range(0, len(btns), 3):
+        rows.append(btns[i:i + 3])
+    rows.append([InlineKeyboardButton('← Back', callback_data='ed:back')])
+    return InlineKeyboardMarkup(rows)
+
+
+# ── /editreport command ───────────────────────────────────────────────────────
+
+async def cmd_editreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    chat_id = str(update.effective_chat.id)
+    _edit_state[chat_id] = {'ctx': 'report', 'awaiting': None}
+    text, kb = _fmt_report_panel()
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+# ── /editdaily command ────────────────────────────────────────────────────────
+
+async def cmd_editdaily(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    chat_id = str(update.effective_chat.id)
+    _edit_state[chat_id] = {'ctx': 'daily', 'awaiting': None}
+    text, kb = _fmt_daily_panel()
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+# ── Edit settings callback handler ────────────────────────────────────────────
+
+async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    await query.answer()
+    if not _allowed(update):
+        return
+
+    data    = query.data or ''
+    chat_id = str(update.effective_chat.id)
+
+    # ── On-demand report panel ── (prefix 'er:')
+    if data.startswith('er:'):
+        action = data[3:]
+
+        if action == 'done':
+            _edit_state.pop(chat_id, None)
+            await query.edit_message_text('✅ Report settings saved.')
+            return
+
+        if action == 'back':
+            text, kb = _fmt_report_panel()
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                          reply_markup=kb)
+            return
+
+        if action == 'dept_menu':
+            kb = _dept_menu_kb('er', settings.get_report_departments())
+            await query.edit_message_text(
+                '📁 <b>Select Departments</b>\n(tap to toggle)',
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action == 'fmt_menu':
+            kb = _fmt_menu_kb('er', settings.get_report_formats())
+            await query.edit_message_text(
+                '📄 <b>Select Formats</b>\n(tap to toggle)',
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action == 'tmpl_menu':
+            kb = _tmpl_menu_kb('er', settings.get_report_template())
+            await query.edit_message_text(
+                '🎨 <b>Select Template</b>',
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action.startswith('dept:'):
+            val = action[5:].strip()
+            if val.upper() == 'ALL':
+                settings.set_report_departments('ALL')
+            else:
+                current = settings.get_report_departments()
+                sel = (set() if current.strip().upper() == 'ALL'
+                       else {d.strip().upper() for d in current.split(',') if d.strip()})
+                if val.upper() in sel:
+                    sel.discard(val.upper())
+                else:
+                    sel.add(val.upper())
+                settings.set_report_departments(','.join(sorted(sel)) if sel else 'ALL')
+            kb = _dept_menu_kb('er', settings.get_report_departments())
+            await query.edit_message_reply_markup(reply_markup=kb)
+            return
+
+        if action.startswith('fmt:'):
+            val = action[4:].strip().lower()
+            if val == 'all':
+                settings.set_report_formats('xlsx,png,pdf')
+            else:
+                current = settings.get_report_formats()
+                sel = {f.strip().lower() for f in current.split(',') if f.strip()}
+                if val in sel:
+                    sel.discard(val)
+                else:
+                    sel.add(val)
+                settings.set_report_formats(','.join(sorted(sel)) if sel else 'xlsx')
+            kb = _fmt_menu_kb('er', settings.get_report_formats())
+            await query.edit_message_reply_markup(reply_markup=kb)
+            return
+
+        if action.startswith('tmpl:'):
+            val = action[5:].strip()
+            settings.set_report_template(val)
+            kb = _tmpl_menu_kb('er', settings.get_report_template())
+            await query.edit_message_reply_markup(reply_markup=kb)
+            return
+
+    # ── Daily report panel ── (prefix 'ed:')
+    if data.startswith('ed:'):
+        action = data[3:]
+
+        if action == 'done':
+            _edit_state.pop(chat_id, None)
+            await query.edit_message_text('✅ Daily report settings saved.')
+            return
+
+        if action == 'back':
+            text, kb = _fmt_daily_panel()
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                          reply_markup=kb)
+            return
+
+        if action == 'time':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']       = 'daily'
+            st['awaiting']  = 'time'
+            st['msg_id']    = query.message.message_id
+            await query.edit_message_text(
+                '🕐 <b>Change Report Time</b>\n\n'
+                f'Current: <b>{settings.daily_time_label()}</b>\n\n'
+                'Reply with the new time in <b>HH:MM</b> format (24h).\n'
+                'Example: <code>08:15</code>',
+                parse_mode=ParseMode.HTML)
+            return
+
+        if action == 'exc':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']      = 'daily'
+            st['awaiting'] = 'exc'
+            st['msg_id']   = query.message.message_id
+            current = settings.get_daily_exclude_badges() or '—'
+            await query.edit_message_text(
+                '🚫 <b>Extra Badge Exclusions</b>\n\n'
+                f'Current: <b>{current}</b>\n\n'
+                'Reply with comma-separated badge numbers to exclude from the <i>daily report</i>.\n'
+                '(These are in addition to the global exclusions in config.ini)\n'
+                'Example: <code>1234,5678</code>\n'
+                'Send <code>none</code> to clear.',
+                parse_mode=ParseMode.HTML)
+            return
+
+        if action == 'dept_menu':
+            kb = _dept_menu_kb('ed', settings.get_daily_departments())
+            await query.edit_message_text(
+                '📁 <b>Select Departments</b>\n(tap to toggle)',
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action == 'fmt_menu':
+            kb = _fmt_menu_kb('ed', settings.get_daily_formats())
+            await query.edit_message_text(
+                '📄 <b>Select Formats</b>\n(tap to toggle)',
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action == 'tmpl_menu':
+            kb = _tmpl_menu_kb('ed', settings.get_daily_template())
+            await query.edit_message_text(
+                '🎨 <b>Select Template</b>',
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action == 'days_menu':
+            kb = _days_menu_kb(settings.get_daily_days())
+            await query.edit_message_text(
+                '📅 <b>Select Report Days</b>\n(tap to toggle)',
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action.startswith('day:'):
+            day_num = int(action[4:])
+            current = settings.get_daily_days()
+            sel = {int(d.strip()) for d in current.split(',') if d.strip().isdigit()}
+            if day_num in sel:
+                sel.discard(day_num)
+            else:
+                sel.add(day_num)
+            settings.set_daily_days(','.join(str(d) for d in sorted(sel)) if sel else '0,1,2,3,6')
+            kb = _days_menu_kb(settings.get_daily_days())
+            await query.edit_message_reply_markup(reply_markup=kb)
+            return
+
+        if action.startswith('dept:'):
+            val = action[5:].strip()
+            if val.upper() == 'ALL':
+                settings.set_daily_departments('ALL')
+            else:
+                current = settings.get_daily_departments()
+                sel = (set() if current.strip().upper() == 'ALL'
+                       else {d.strip().upper() for d in current.split(',') if d.strip()})
+                if val.upper() in sel:
+                    sel.discard(val.upper())
+                else:
+                    sel.add(val.upper())
+                settings.set_daily_departments(','.join(sorted(sel)) if sel else 'ALL')
+            kb = _dept_menu_kb('ed', settings.get_daily_departments())
+            await query.edit_message_reply_markup(reply_markup=kb)
+            return
+
+        if action.startswith('fmt:'):
+            val = action[4:].strip().lower()
+            if val == 'all':
+                settings.set_daily_formats('xlsx,png,pdf')
+            else:
+                current = settings.get_daily_formats()
+                sel = {f.strip().lower() for f in current.split(',') if f.strip()}
+                if val in sel:
+                    sel.discard(val)
+                else:
+                    sel.add(val)
+                settings.set_daily_formats(','.join(sorted(sel)) if sel else 'xlsx')
+            kb = _fmt_menu_kb('ed', settings.get_daily_formats())
+            await query.edit_message_reply_markup(reply_markup=kb)
+            return
+
+        if action.startswith('tmpl:'):
+            val = action[5:].strip()
+            settings.set_daily_template(val)
+            kb = _tmpl_menu_kb('ed', settings.get_daily_template())
+            await query.edit_message_reply_markup(reply_markup=kb)
+            return
+
+
+# ── Text input handler for awaiting states ────────────────────────────────────
+
+async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Capture plain text input when an edit panel is awaiting a value."""
+    if not _allowed(update):
+        return
+    chat_id = str(update.effective_chat.id)
+    st = _edit_state.get(chat_id)
+    if not st or not st.get('awaiting'):
+        return  # nothing awaiting — ignore
+
+    text = (update.message.text or '').strip()
+    awaiting = st['awaiting']
+
+    if awaiting == 'time':
+        # Expect HH:MM
+        try:
+            h, m = map(int, text.split(':'))
+            assert 0 <= h <= 23 and 0 <= m <= 59
+            settings.set_daily_hour(h)
+            settings.set_daily_minute(m)
+            st['awaiting'] = None
+            await update.message.reply_text(
+                f"✅ Daily report time set to <b>{h:02d}:{m:02d}</b>\n"
+                f"Use /editdaily to review all settings.",
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.message.reply_text(
+                '❌ Invalid format. Please send time as <code>HH:MM</code> (e.g. <code>08:15</code>).',
+                parse_mode=ParseMode.HTML)
+        return
+
+    if awaiting == 'exc':
+        if text.lower() in ('none', 'clear', '—'):
+            settings.set_daily_exclude_badges('')
+            st['awaiting'] = None
+            await update.message.reply_text('✅ Extra badge exclusions cleared.')
+        else:
+            badges = ','.join(b.strip() for b in text.replace(' ', ',').split(',')
+                              if b.strip())
+            settings.set_daily_exclude_badges(badges)
+            st['awaiting'] = None
+            await update.message.reply_text(
+                f"✅ Extra excluded badges set to: <b>{badges}</b>",
+                parse_mode=ParseMode.HTML)
+        return
 
 # ── Employee commands ─────────────────────────────────────────────────────────
 
@@ -1030,42 +1583,54 @@ def main():
 
     # Register handlers
     handlers = [
-        ('start',     cmd_start),
-        ('help',      cmd_help),
+        ('start',       cmd_start),
+        ('help',        cmd_help),
         # Attendance
-        ('today',     cmd_today),
-        ('absent',    cmd_absent),
-        ('present',   cmd_present),
-        ('late',      cmd_late),
-        ('whoisin',   cmd_whoisin),
-        ('feed',      cmd_feed),
-        ('week',      cmd_week),
-        ('month',     cmd_month),
-        ('topabsent', cmd_topabsent),
-        ('history',   cmd_history),
-        ('report',    cmd_report),
+        ('today',       cmd_today),
+        ('absent',      cmd_absent),
+        ('present',     cmd_present),
+        ('late',        cmd_late),
+        ('whoisin',     cmd_whoisin),
+        ('feed',        cmd_feed),
+        ('latest',      cmd_latest),
+        ('week',        cmd_week),
+        ('month',       cmd_month),
+        ('topabsent',   cmd_topabsent),
+        ('history',     cmd_history),
+        ('report',      cmd_report),
         # Employee
-        ('search',    cmd_search),
-        ('punches',   cmd_punches),
-        ('calendar',  cmd_calendar),
+        ('search',      cmd_search),
+        ('punches',     cmd_punches),
+        ('calendar',    cmd_calendar),
         # Devices
-        ('devices',   cmd_devices),
-        ('clocksync', cmd_clocksync),
-        ('reboot',    cmd_reboot),
-        ('usersync',  cmd_usersync),
-        ('adduser',   cmd_adduser),
-        ('unknown',   cmd_unknown_users),
+        ('devices',     cmd_devices),
+        ('clocksync',   cmd_clocksync),
+        ('reboot',      cmd_reboot),
+        ('usersync',    cmd_usersync),
+        ('adduser',     cmd_adduser),
+        ('unknown',     cmd_unknown_users),
+        # Settings
+        ('livepunches', cmd_livepunches),
+        ('editreport',  cmd_editreport),
+        ('editdaily',   cmd_editdaily),
         # DB
-        ('stats',     cmd_stats),
-        ('mdbinfo',   cmd_mdbinfo),
-        ('setmdb',    cmd_setmdb),
-        ('tables',    cmd_tables),
+        ('stats',       cmd_stats),
+        ('mdbinfo',     cmd_mdbinfo),
+        ('setmdb',      cmd_setmdb),
+        ('tables',      cmd_tables),
     ]
 
     for cmd, handler in handlers:
         app.add_handler(CommandHandler(cmd, handler))
 
+    # Callback query handlers — route by prefix
+    app.add_handler(CallbackQueryHandler(callback_edit,
+                                         pattern=r'^(er:|ed:)'))
     app.add_handler(CallbackQueryHandler(callback_calendar))
+
+    # Text input handler (for edit panel awaiting states)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                   handle_text_input))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
     logger.info('Bot running. Press Ctrl+C to stop.')
