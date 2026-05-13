@@ -177,7 +177,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "<b>Devices</b>\n"
         "/devices — all device status\n"
         "/clocksync — sync all device clocks\n"
-        "/reboot &lt;ip or name&gt; — reboot a device\n"
+        "/reboot &lt;ip or name&gt; | all — reboot a device or all\n"
         "/usersync — sync users across devices\n"
         "/adduser &lt;badge&gt; &lt;name&gt; — add user to all devices\n"
         "/unknown — users on devices not in MDB\n\n"
@@ -256,7 +256,8 @@ async def cmd_whoisin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines = [f"🏢 <b>Currently Inside — {len(inside)} people</b>\n"]
         for e in sorted(inside, key=lambda x: x['dept']):
             lines.append(f"✅ {e['name']} ({e['dept']}) — last punch {e['last_punch']}")
-        await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
 
@@ -484,16 +485,32 @@ async def cmd_clocksync(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f'❌ {e}')
 
 async def cmd_reboot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Usage: /reboot <ip or device name>"""
+    """Usage: /reboot <ip or device name> | /reboot all"""
     if not _allowed(update):
         return await _deny(update)
     if not ctx.args:
         await update.message.reply_text(
             'Usage: /reboot &lt;ip or name&gt;\n'
             'Example: /reboot 10.20.141.23\n'
-            'Example: /reboot Boys 1', parse_mode=ParseMode.HTML)
+            'Example: /reboot Boys 1\n'
+            'Example: /reboot all', parse_mode=ParseMode.HTML)
         return
     target = ' '.join(ctx.args).strip()
+    if target.lower() == 'all':
+        await update.message.reply_text('⏳ Rebooting all devices...')
+        try:
+            results = zk_devices.reboot_all()
+            lines = ['🔄 <b>Reboot All Results</b>\n']
+            for r in results:
+                icon = '✅' if r['ok'] else '❌'
+                line = f"{icon} {r['name']} ({r['ip']})"
+                if not r['ok']:
+                    line += f" — {r.get('error', 'Unknown error')}"
+                lines.append(line)
+            await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+        except Exception as e:
+            await update.message.reply_text(f'❌ {e}')
+        return
     await update.message.reply_text(f'⏳ Rebooting {target}...')
     try:
         result = zk_devices.reboot_device(target)
@@ -572,7 +589,8 @@ async def cmd_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"🔴 UID:{u['uid']} | ID:{u['user_id']} | "
                 f"Name: {u['name_on_device'] or '—'}\n"
                 f"   Device: {u['device_name']} ({u['device_ip']})")
-        await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
 
