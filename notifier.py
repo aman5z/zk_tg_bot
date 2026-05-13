@@ -233,6 +233,9 @@ async def run_scheduler(bot: Bot):
 
             daily_days = {int(d.strip()) for d in settings.get_daily_days().split(',')
                           if d.strip().isdigit()}
+            if not daily_days:
+                logger.warning("daily_days is empty or invalid; using Mon-Thu+Sun fallback")
+                daily_days = {0, 1, 2, 3, 6}
             is_report_day = today.weekday() in daily_days
 
             if (is_report_day

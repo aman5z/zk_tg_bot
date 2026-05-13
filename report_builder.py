@@ -73,6 +73,8 @@ _COL_WIDTHS_FIG = [0.09, 0.42, 0.22]             # relative widths for figure ta
 
 def _hex_to_rgb(h: str) -> Tuple[float, float, float]:
     h = h.lstrip('#')
+    if len(h) != 6 or not all(c in '0123456789abcdefABCDEF' for c in h):
+        raise ValueError(f"Invalid hex colour: '#{h}'")
     return tuple(int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
 
 

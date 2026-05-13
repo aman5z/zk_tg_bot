@@ -167,10 +167,6 @@ def get_chat_id() -> str:
     return _cfg.get('telegram', 'chat_id', fallback='').strip()
 
 
-def get_notify_device_status() -> bool:
-    return _cfg.getboolean('notifications', 'notify_device_status', fallback=True)
-
-
 # ─── Summary helpers ──────────────────────────────────────────────────────────
 
 _DAY_NAMES = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu',

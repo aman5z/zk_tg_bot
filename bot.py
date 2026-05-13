@@ -1054,8 +1054,12 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if awaiting == 'time':
         # Expect HH:MM
         try:
-            h, m = map(int, text.split(':'))
-            assert 0 <= h <= 23 and 0 <= m <= 59
+            parts = text.split(':')
+            if len(parts) != 2:
+                raise ValueError('wrong format')
+            h, m = int(parts[0]), int(parts[1])
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError('out of range')
             settings.set_daily_hour(h)
             settings.set_daily_minute(m)
             st['awaiting'] = None
@@ -1075,8 +1079,16 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             st['awaiting'] = None
             await update.message.reply_text('✅ Extra badge exclusions cleared.')
         else:
-            badges = ','.join(b.strip() for b in text.replace(' ', ',').split(',')
-                              if b.strip())
+            raw_badges = [b.strip() for b in text.replace(' ', ',').split(',')
+                          if b.strip()]
+            invalid = [b for b in raw_badges if not b.isdigit()]
+            if invalid:
+                await update.message.reply_text(
+                    f"❌ Badge numbers must be numeric. Invalid: {', '.join(invalid)}\n"
+                    "Please try again.",
+                    parse_mode=ParseMode.HTML)
+                return
+            badges = ','.join(raw_badges)
             settings.set_daily_exclude_badges(badges)
             st['awaiting'] = None
             await update.message.reply_text(

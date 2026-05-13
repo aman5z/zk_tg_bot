@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 _cfg = configparser.ConfigParser()
 _cfg.read(os.path.join(os.path.dirname(__file__), 'config.ini'))
 
-# Avoid circular import: settings.get_excluded_badges() also reads config.ini but
-# mdb_reader is imported by settings indirectly through notifier.  We read the
-# global excluded badges directly from _cfg here.
+# Avoid circular import: both mdb_reader and settings read config.ini directly.
+# mdb_reader must NOT import settings to prevent a circular dependency chain.
+# We read the global excluded badges directly from _cfg here instead.
 def _get_excluded_badges() -> set:
     raw = _cfg.get('employees', 'exclude_badges', fallback='')
     return {b.strip() for b in raw.split(',') if b.strip()}
