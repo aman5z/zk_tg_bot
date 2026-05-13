@@ -523,18 +523,46 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f'❌ {e}')
 
 async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Send today's absent list in configured format(s)."""
+    """Show date-selection prompt for the absent report."""
     if not _allowed(update):
         return await _deny(update)
-    await update.message.reply_text('⏳ Building report...')
+    today     = date.today()
+    yesterday = today - timedelta(days=1)
+    keyboard  = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f'📅 Today ({today.strftime("%d/%m/%Y")})',
+                callback_data='rep:today',
+            ),
+            InlineKeyboardButton(
+                f'📅 Yesterday ({yesterday.strftime("%d/%m/%Y")})',
+                callback_data='rep:yesterday',
+            ),
+        ],
+        [InlineKeyboardButton('📆 Pick Date', callback_data='rep:pick')],
+        [InlineKeyboardButton('❌ Cancel',     callback_data='rep:cancel')],
+    ])
+    await update.message.reply_text(
+        '📊 <b>Absent Report</b>\n\nSelect date:',
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+
+async def _send_absent_report_callback(query, update: Update, report_date: date):
+    """Build and send the absent report for *report_date* via a callback context."""
     try:
-        summary = mdb_reader.get_today_summary()
-        absent  = summary['absent']
-        today   = date.today()
+        history = mdb_reader.get_history(report_date, report_date)
+        if not history:
+            await query.edit_message_text(
+                f'❌ No data for {report_date.strftime("%d/%m/%Y")}')
+            return
+        day_data = history[0]
+        absent   = day_data['absent']
 
         if not absent:
-            await update.message.reply_text(
-                f"✅ No absences today ({summary['date']}). All staff present!")
+            await query.edit_message_text(
+                f'✅ No absences on {report_date.strftime("%d/%m/%Y")}. All staff present!')
             return
 
         depts    = settings.get_report_departments()
@@ -543,22 +571,24 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         files = report_builder.build_absent_report(
             absent=absent,
-            report_date=today,
+            report_date=report_date,
             departments=depts,
             formats=formats,
             template=template,
         )
-        caption = f'Absent list — {today.strftime("%d/%m/%Y")}  ({summary["absent_count"]} absent)'
+        caption = (f'Absent list — {report_date.strftime("%d/%m/%Y")}'
+                   f'  ({len(absent)} absent)')
         for fmt_key, (buf, filename) in files.items():
+            buf.seek(0)
             if fmt_key == 'png':
-                buf.seek(0)
-                await update.message.reply_photo(photo=buf, caption=caption)
+                await update.effective_chat.send_photo(photo=buf, caption=caption)
             else:
-                buf.seek(0)
-                await update.message.reply_document(document=buf, filename=filename,
-                                                    caption=caption)
+                await update.effective_chat.send_document(
+                    document=buf, filename=filename, caption=caption)
+        await query.edit_message_text(
+            f'✅ Report sent for {report_date.strftime("%d/%m/%Y")}')
     except Exception as e:
-        await update.message.reply_text(f'❌ {e}')
+        await query.edit_message_text(f'❌ {e}')
 
 # ── /latest — latest MDB punches + live device times ─────────────────────────
 
@@ -1230,6 +1260,32 @@ async def callback_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text('❌ Cancelled.')
         return
 
+    # ── Report date selection ────────────────────────────────────────────
+    if data.startswith('rep:'):
+        action = data[4:]
+        if action == 'cancel':
+            await query.edit_message_text('❌ Cancelled.')
+            return
+        if action == 'today':
+            report_date = date.today()
+        elif action == 'yesterday':
+            report_date = date.today() - timedelta(days=1)
+        elif action == 'pick':
+            today = date.today()
+            kb = _make_cal_keyboard(today.year, today.month, 'R', '_rep_')
+            await query.edit_message_text(
+                '📊 <b>Absent Report</b>\n\n📅 Select date:',
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+            return
+        else:
+            return
+        await query.edit_message_text(
+            f'⏳ Building report for {report_date.strftime("%d/%m/%Y")}…')
+        await _send_absent_report_callback(query, update, report_date)
+        return
+
     # ── Mode selection (Single / Range-start) ───────────────────────────
     if data.startswith('att_mode:'):
         # format: att_mode:{S|F}:{badge}
@@ -1269,6 +1325,8 @@ async def callback_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             title = f'📅 <b>Select date</b>\n👤 {name} ({badge})'
         elif mode == 'F':
             title = f'📅 <b>Select start date</b>\n👤 {name} ({badge})'
+        elif mode == 'R':
+            title = '📊 <b>Absent Report</b>\n\n📅 Select date:'
         else:
             title = (f'📅 <b>Select end date</b>\n👤 {name} ({badge})\n'
                      f'⏩ From: {range_from}')
@@ -1324,6 +1382,13 @@ async def callback_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML)
             result = _fmt_range_punches(badge, name, dept, d_from_str, d_to_str)
             await _edit_or_followup(query, update, result)
+
+        elif mode == 'R':
+            # Report date selected from calendar picker
+            report_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
+            await query.edit_message_text(
+                f'⏳ Building report for {report_date.strftime("%d/%m/%Y")}…')
+            await _send_absent_report_callback(query, update, report_date)
         return
 
 async def _edit_or_followup(query, update: Update, text: str):
