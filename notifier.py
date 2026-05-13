@@ -137,9 +137,10 @@ _last_device_status: dict = {}   # ip → online bool
 
 
 async def check_device_status_changes(bot: Bot):
-    """Send alert if any device changes online/offline state."""
-    if not settings.get_notify_device_status():
-        return
+    """
+    Send alert if any device changes online/offline state.
+    This runs unconditionally — device monitoring is always enabled.
+    """
     try:
         statuses = zk_devices.get_device_status()
         for s in statuses:
@@ -199,9 +200,9 @@ async def check_live_punches(bot: Bot):
 async def run_scheduler(bot: Bot):
     """
     Async scheduler loop.
-    - Device status: every 5 minutes
-    - Live punches: every minute (if enabled)
-    - Daily report: once per day at configured time on configured days
+    - Device online/offline alerts: every 5 minutes, always-on (not configurable).
+    - Live punches: every minute, optional — toggle with /livepunches.
+    - Daily report: once per day at configured time on configured days.
     """
     report_sent_today = None
     device_check_interval = 300   # 5 min

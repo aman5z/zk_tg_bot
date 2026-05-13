@@ -315,7 +315,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/late — late arrivals today\n"
         "/whoisin — currently inside building\n"
         "/feed — last 20 punches\n"
-        "/latest — latest 2 MDB punches + device times\n"
+        "/latest — device status + last 2 MDB punches per device\n"
         "/week — this week summary\n"
         "/month — monthly dept summary\n"
         "/topabsent — most absent this month\n"
@@ -563,33 +563,31 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── /latest — latest MDB punches + live device times ─────────────────────────
 
 async def cmd_latest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Show the 2 most recent MDB punches and live device clock times."""
+    """
+    Ping all devices, then show 2 most recent MDB punches per online device
+    (grouped by SENSORID).  4 online devices → up to 8 punch entries.
+    """
     if not _allowed(update):
         return await _deny(update)
-    await update.message.reply_text('⏳ Fetching...')
+    await update.message.reply_text('⏳ Pinging devices and fetching MDB…')
     lines = ['🔄 <b>Latest MDB Activity</b>\n']
 
-    # — Latest 2 punches from MDB —
+    # ── 1. Ping all devices ──────────────────────────────────────────────
+    device_statuses = []
     try:
-        punches = mdb_reader.get_latest_punches(n=2, days_back=3)
-        if punches:
-            lines.append('📌 <b>Last 2 Punches (MDB):</b>')
-            for p in punches:
-                dev = p.get('device') or '?'
-                date_label = (p['date'].strftime('%d/%m/%Y')
-                              if p['date'] != date.today() else 'Today')
-                lines.append(
-                    f"  🕐 {date_label} {p['time']}"
-                    f"  👤 {p['name']}  🏷 {p['badge']}"
-                    f"  🏢 {p['dept']}"
-                    f"\n     📡 Device: <code>{dev}</code>"
-                )
-        else:
-            lines.append('📌 No recent punches found.')
+        device_statuses = zk_devices.get_device_status()
+        online_count = sum(1 for s in device_statuses if s['online'])
+        lines.append(
+            f'📡 <b>Devices: {online_count}/{len(device_statuses)} online</b>'
+        )
+        for s in device_statuses:
+            icon  = '🟢' if s['online'] else '🔴'
+            extra = f" — 🕐 {s['time']}" if s['online'] and s.get('time') else ''
+            lines.append(f"  {icon} {s['name']} ({s['ip']}){extra}")
     except Exception as e:
-        lines.append(f'📌 Punch fetch error: {e}')
+        lines.append(f'  ⚠️ Device ping failed: {e}')
 
-    # — MDB file modification time —
+    # ── 2. MDB file modification time ────────────────────────────────────
     try:
         info = mdb_reader.get_mdb_info()
         if info.get('last_modified'):
@@ -597,22 +595,28 @@ async def cmd_latest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # — Live device times —
-    lines.append('\n📡 <b>Device Times (Live):</b>')
+    # ── 3. Latest 2 punches per device SENSORID ──────────────────────────
+    lines.append('\n📌 <b>Latest 2 Punches per Device (MDB):</b>')
     try:
-        statuses = zk_devices.get_device_status()
-        for s in statuses:
-            icon = '🟢' if s['online'] else '🔴'
-            if s['online'] and s.get('time'):
-                lines.append(f"  {icon} {s['name']} ({s['ip']}) — 🕐 {s['time']}")
-            elif s['online']:
-                lines.append(f"  {icon} {s['name']} ({s['ip']}) — online")
-            else:
-                lines.append(f"  {icon} {s['name']} ({s['ip']}) — offline")
+        per_device = mdb_reader.get_latest_punches_per_device(n=2, days_back=3)
+        if per_device:
+            for sensor_id, punches in sorted(per_device.items(),
+                                             key=lambda kv: kv[0]):
+                lines.append(f"\n  🖥 <b>Sensor / Device ID: {sensor_id}</b>")
+                for p in punches:
+                    date_label = (p['date'].strftime('%d/%m/%Y')
+                                  if p['date'] != date.today() else 'Today')
+                    lines.append(
+                        f"    🕐 {date_label} {p['time']}  "
+                        f"👤 {p['name']}  🏷 {p['badge']}  🏢 {p['dept']}"
+                    )
+        else:
+            lines.append('  No recent punches found in MDB.')
     except Exception as e:
-        lines.append(f'  ⚠️ Device check failed: {e}')
+        lines.append(f'  ⚠️ Punch fetch error: {e}')
 
-    await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+    for chunk in _split('\n'.join(lines)):
+        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
 
 # ── /livepunches — toggle live punch notifications ────────────────────────────

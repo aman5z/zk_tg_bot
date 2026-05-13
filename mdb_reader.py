@@ -516,7 +516,38 @@ def get_employee_punches(badge: str, date_from: date, date_to: date) -> list:
     return get_attendance(date_from, date_to, badge=badge)
 
 
-# ─── Latest punches (most recent N across all employees) ──────────────────────
+# ─── Latest punches per device (SENSORID) ────────────────────────────────────
+
+def get_latest_punches_per_device(n: int = 2, days_back: int = 3) -> dict:
+    """
+    Return the most recent `n` punch records for each device (SENSORID) found
+    in the MDB over the last `days_back` days.
+
+    Returns dict: sensorid → list of punch dicts (newest first, at most n each).
+    Each punch includes resolved employee info (badge, name, dept).
+    """
+    today     = date.today()
+    date_from = today - timedelta(days=days_back - 1)
+    punches   = get_attendance(date_from, today)
+    uid_map   = _uid_map()
+
+    by_device: dict = {}
+    # Sort newest-first so we naturally take the first n per device
+    for p in sorted(punches, key=lambda x: x['timestamp'], reverse=True):
+        dev = p['device'] or 'unknown'
+        bucket = by_device.setdefault(dev, [])
+        if len(bucket) < n:
+            emp = uid_map.get(p['uid'])
+            bucket.append({
+                'badge':     emp['badge'] if emp else p['uid'],
+                'name':      emp['name']  if emp else 'Unknown',
+                'dept':      emp['dept']  if emp else '—',
+                'timestamp': p['timestamp'],
+                'time':      p['time'],
+                'date':      p['date'],
+                'device':    dev,
+            })
+    return by_device
 
 def get_latest_punches(n: int = 10, days_back: int = 3) -> list:
     """
