@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 from io import BytesIO
 
 import pandas as pd
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                            MessageHandler, filters, ContextTypes)
 from telegram.constants import ParseMode
@@ -549,7 +549,7 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def _send_absent_report_callback(query, update: Update, report_date: date):
+async def _send_absent_report_callback(query: CallbackQuery, update: Update, report_date: date):
     """Build and send the absent report for *report_date* via a callback context."""
     try:
         history = mdb_reader.get_history(report_date, report_date)
