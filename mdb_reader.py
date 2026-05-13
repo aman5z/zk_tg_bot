@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 _cfg = configparser.ConfigParser()
 _cfg.read(os.path.join(os.path.dirname(__file__), 'config.ini'))
 
+# Avoid circular import: both mdb_reader and settings read config.ini directly.
+# mdb_reader must NOT import settings to prevent a circular dependency chain.
+# We read the global excluded badges directly from _cfg here instead.
+def _get_excluded_badges() -> set:
+    raw = _cfg.get('employees', 'exclude_badges', fallback='')
+    return {b.strip() for b in raw.split(',') if b.strip()}
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 def _get_mdb_path() -> str:
@@ -149,10 +156,16 @@ def refresh_dept_cache():
     _dept_cache = {}
     _get_dept_map()
 
+
+def get_dept_map() -> dict:
+    """Public wrapper around the cached department map."""
+    return _get_dept_map()
+
 # ─── Employees ────────────────────────────────────────────────────────────────
 
 def get_employees(active_only: bool = True) -> list:
-    excluded = _get_excluded_depts()
+    excluded_depts   = _get_excluded_depts()
+    excluded_badges  = _get_excluded_badges()
     dept_map = _get_dept_map()
     rows = _mdb_export('USERINFO')
     result = []
@@ -166,7 +179,9 @@ def get_employees(active_only: bool = True) -> list:
 
         if not badge or not name:
             continue
-        if dept.upper() in excluded:
+        if badge in excluded_badges:
+            continue
+        if dept.upper() in excluded_depts:
             continue
         if active_only and active == '0':
             continue
@@ -499,3 +514,90 @@ def get_db_stats() -> dict:
 
 def get_employee_punches(badge: str, date_from: date, date_to: date) -> list:
     return get_attendance(date_from, date_to, badge=badge)
+
+
+# ─── Latest punches per device (SENSORID) ────────────────────────────────────
+
+def get_latest_punches_per_device(n: int = 2, days_back: int = 3) -> dict:
+    """
+    Return the most recent `n` punch records for each device (SENSORID) found
+    in the MDB over the last `days_back` days.
+
+    Returns dict: sensorid → list of punch dicts (newest first, at most n each).
+    Each punch includes resolved employee info (badge, name, dept).
+    """
+    today     = date.today()
+    date_from = today - timedelta(days=days_back - 1)
+    punches   = get_attendance(date_from, today)
+    uid_map   = _uid_map()
+
+    by_device: dict = {}
+    # Sort newest-first so we naturally take the first n per device
+    for p in sorted(punches, key=lambda x: x['timestamp'], reverse=True):
+        dev = p['device'] or 'unknown'
+        bucket = by_device.setdefault(dev, [])
+        if len(bucket) < n:
+            emp = uid_map.get(p['uid'])
+            bucket.append({
+                'badge':     emp['badge'] if emp else p['uid'],
+                'name':      emp['name']  if emp else 'Unknown',
+                'dept':      emp['dept']  if emp else '—',
+                'timestamp': p['timestamp'],
+                'time':      p['time'],
+                'date':      p['date'],
+                'device':    dev,
+            })
+    return by_device
+
+def get_latest_punches(n: int = 10, days_back: int = 3) -> list:
+    """
+    Return the most recent `n` punch records from the last `days_back` days.
+    Each record includes employee info (badge, name, dept) and timestamp/device.
+    """
+    today = date.today()
+    date_from = today - timedelta(days=days_back - 1)
+    punches = get_attendance(date_from, today)
+    uid_map = _uid_map()
+
+    recent = sorted(punches, key=lambda x: x['timestamp'], reverse=True)[:n]
+    result = []
+    for p in recent:
+        emp = uid_map.get(p['uid'])
+        result.append({
+            'badge':     emp['badge'] if emp else p['uid'],
+            'name':      emp['name']  if emp else 'Unknown',
+            'dept':      emp['dept']  if emp else '—',
+            'timestamp': p['timestamp'],
+            'time':      p['time'],
+            'date':      p['date'],
+            'device':    p['device'],
+        })
+    return result
+
+
+# ─── Live punch feed (punches since a given timestamp) ────────────────────────
+
+def get_live_punches_since(since_ts: datetime) -> list:
+    """
+    Return all punch records after `since_ts` (today and yesterday only).
+    Used by the live-punch notification loop.
+    """
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    punches = get_attendance(yesterday, today)
+    uid_map = _uid_map()
+
+    result = []
+    for p in sorted(punches, key=lambda x: x['timestamp']):
+        if p['timestamp'] <= since_ts:
+            continue
+        emp = uid_map.get(p['uid'])
+        result.append({
+            'badge':     emp['badge'] if emp else p['uid'],
+            'name':      emp['name']  if emp else 'Unknown',
+            'dept':      emp['dept']  if emp else '—',
+            'timestamp': p['timestamp'],
+            'time':      p['time'],
+            'device':    p['device'],
+        })
+    return result
