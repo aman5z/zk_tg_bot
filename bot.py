@@ -915,7 +915,7 @@ _ALL_FORMATS = ['xlsx', 'png', 'pdf']
 # Prefix like 'er:dept:' = 8 chars, leaving 56 for dept name.
 # We cap at 50 chars to be safe.
 _MAX_DEPT_CALLBACK_LEN = 50
-CSV_PREVIEW_MAX_CHARS = 2500
+CSV_PREVIEW_MAX_CHARS = 3000
 
 
 def _get_dept_list() -> list:
@@ -2047,7 +2047,8 @@ async def cmd_download(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             lines.append("")
             lines.append("<b>Latest MDB punches linked to this device id:</b>")
             for p in punches:
-                p_date = p['date'].strftime('%d/%m') if hasattr(p.get('date'), 'strftime') else str(p.get('date', ''))
+                p_date_obj = p.get('date')
+                p_date = p_date_obj.strftime('%d/%m') if isinstance(p_date_obj, date) else str(p_date_obj or '')
                 lines.append(
                     f"• {p_date} {p['time']} — {p['name']} ({p['badge']})"
                 )
@@ -2177,6 +2178,7 @@ async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not filename.lower().endswith('.csv'):
         await update.message.reply_text('❌ Please upload a .csv file (preview mode is still active).')
         return
+    used_latin1_fallback = False
     try:
         tg_file = await doc.get_file()
         data = await tg_file.download_as_bytearray()
@@ -2184,6 +2186,7 @@ async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except UnicodeDecodeError:
         logger.info(f'CSV {filename} not UTF-8, falling back to latin-1 decode.')
         text = bytes(data).decode('latin-1')
+        used_latin1_fallback = True
     except Exception as e:
         await update.message.reply_text(f'❌ Failed to download CSV: {e}')
         return
@@ -2204,7 +2207,15 @@ async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if preview.empty:
             lines.append("\nPreview: file has headers but no data rows.")
         else:
-            preview_csv = html.escape(preview.to_csv(index=False).strip()[:CSV_PREVIEW_MAX_CHARS])
+            preview_display = preview.iloc[:, :12].copy()
+            for col in preview_display.columns:
+                preview_display[col] = preview_display[col].astype(str).str.slice(0, 40)
+            preview_csv_lines = html.escape(preview_display.to_csv(index=False).strip()).splitlines()
+            while preview_csv_lines and len('\n'.join(preview_csv_lines)) > CSV_PREVIEW_MAX_CHARS:
+                preview_csv_lines.pop()
+            preview_csv = '\n'.join(preview_csv_lines)
+            if used_latin1_fallback:
+                lines.append("\n⚠️ File was not UTF-8; decoded using latin-1 fallback.")
             lines.append("\n<b>Preview (first 10 rows):</b>")
             lines.append("<code>" + preview_csv + "</code>")
         for chunk in _split('\n'.join(lines)):
