@@ -652,7 +652,12 @@ async def cmd_trend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for row in trend:
             arrow = '⏺'
             if prev is not None:
-                arrow = '⬆️' if row['present_pct'] > prev else '⬇️' if row['present_pct'] < prev else '➡️'
+                if row['present_pct'] > prev:
+                    arrow = '⬆️'
+                elif row['present_pct'] < prev:
+                    arrow = '⬇️'
+                else:
+                    arrow = '➡️'
             lines.append(
                 f"{arrow} {row['date_str']}: {row['present_pct']}% "
                 f"(✅{row['present_count']} / ❌{row['absent_count']})"
@@ -2214,7 +2219,8 @@ async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             preview_csv_lines = html.escape(preview_display.to_csv(index=False).strip()).splitlines()
             kept_lines, total_len = [], 0
             for ln in preview_csv_lines:
-                add_len = len(ln) + (1 if kept_lines else 0)
+                newline_overhead = 1 if kept_lines else 0
+                add_len = len(ln) + newline_overhead
                 if total_len + add_len > CSV_PREVIEW_MAX_CHARS:
                     break
                 kept_lines.append(ln)
