@@ -93,15 +93,20 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_absent` | `/absent` | Lists today's absent employees (name + department), split across messages if needed. |
 | `cmd_present` | `/present` | Lists today's present employees (name + department). |
 | `cmd_late` | `/late` | Lists employees whose first punch today was after shift start, sorted by minutes late (descending). |
+| `cmd_early` | `/early` | Lists employees whose first punch today was before shift start, sorted by minutes early. |
 | `cmd_whoisin` | `/whoisin` | Lists employees believed to be currently inside the building (odd punch count today = checked in but not out). |
 | `cmd_feed` | `/feed` | Shows the 20 most recent punches today. |
 | `cmd_week` | `/week` | Day-by-day present/absent counts for the current week (Sun → today, UAE calendar). |
 | `cmd_month` | `/month` | Per-department attendance percentage for the month to date. |
 | `cmd_topabsent` | `/topabsent` | Top 10 most-absent employees for the current month. |
+| `cmd_dept` | `/dept <name>` | Today's present/absent breakdown for matching department name(s). |
 | `cmd_history` | `/history DD/MM/YYYY DD/MM/YYYY` | Day-by-day attendance summary for a custom date range (max 31 days). |
+| `cmd_syncrange` | `/syncrange DD/MM/YYYY DD/MM/YYYY` | Read-only range summary (no write-back/sync to MDB). |
+| `cmd_trend` | `/trend [days]` | Attendance trend over the last working days (default 14). |
 | `cmd_report` | `/report` | Triggers `notifier.send_daily_report()` on demand — sends today's absent list as an XLSX file. |
 | `cmd_search` | `/search <name or badge>` | Searches employee records by name or badge number (partial match, case-insensitive). Returns up to 20 results with active/inactive status. |
 | `cmd_punches` | `/punches <badge>` | Lists today's punch times for a specific employee, labelled `→ IN` / `← OUT` by order. |
+| `cmd_employeereport` | `/employeereport <badge>` | Month-to-date read-only attendance report for one employee. |
 | `cmd_calendar` | `/calendar <badge> [YYYY-MM]` | Renders a full-month emoji calendar grid for an employee. Defaults to the current month. |
 | `cmd_devices` | `/devices` | Pings all configured ZKTeco devices and reports online status, user count, and device clock. |
 | `cmd_clocksync` | `/clocksync` | Sets the clock on every device to the current system time. |
@@ -113,6 +118,12 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_mdbinfo` | `/mdbinfo` | Shows the configured and resolved MDB paths plus file metadata. |
 | `cmd_setmdb` | `/setmdb <path>` | Updates the MDB path in `config.ini` at runtime and immediately tests accessibility. |
 | `cmd_tables` | `/tables` | Lists all tables in the MDB file (diagnostic). |
+| `cmd_download` | `/download <ip>` | Read-only device snapshot and recent linked MDB punches (no download/write action). |
+| `cmd_dbbackup` | `/dbbackup` | Sends a read-only copy of the MDB file. |
+| `cmd_importcsv` | `/importcsv` | CSV validation/preview only (no MDB import). |
+| `cmd_autonmap` | `/autonmap` | Suggests UID→badge matches only (not persisted). |
+| `cmd_shifts` | `/shifts` | Read-only shift configuration view. |
+| `cmd_workdays` | `/workdays` | Read-only workday/report-days configuration view. |
 | `unknown_cmd` | *(any other command)* | Replies with `❓ Unknown command. Send /help for list.` |
 
 #### Main entry
@@ -392,12 +403,16 @@ sudo journalctl -u zkbot -f    # live logs
 | `/absent` | Full absent employee list (name + department) |
 | `/present` | Full present employee list |
 | `/late` | Employees whose first punch was after shift start, sorted by minutes late |
+| `/early` | Employees whose first punch was before shift start, sorted by minutes early |
 | `/whoisin` | Employees currently inside (checked in but not checked out) |
 | `/feed` | Last 20 punches today |
 | `/week` | Day-by-day summary for the current work week (Sun → today) |
 | `/month` | Per-department attendance percentage, month to date |
 | `/topabsent` | Top 10 most-absent employees this month |
+| `/dept <name>` | Present/absent breakdown for matching department name(s) |
 | `/history DD/MM/YYYY DD/MM/YYYY` | Day-by-day attendance for a custom range (max 31 days) |
+| `/syncrange DD/MM/YYYY DD/MM/YYYY` | Read-only range summary (no write-back to MDB) |
+| `/trend [days]` | Attendance trend over latest working days (default 14) |
 | `/report` | Send today's absent list as an XLSX file |
 
 ### Employee
@@ -406,6 +421,7 @@ sudo journalctl -u zkbot -f    # live logs
 |---------|-------------|
 | `/search <name or badge>` | Search employees by name or badge (partial match) |
 | `/punches <badge>` | Today's punch times for one employee, labelled IN/OUT |
+| `/employeereport <badge>` | Month-to-date read-only attendance report for one employee |
 | `/calendar <badge> [YYYY-MM]` | Monthly emoji attendance calendar for one employee |
 
 ### Devices
@@ -427,6 +443,12 @@ sudo journalctl -u zkbot -f    # live logs
 | `/mdbinfo` | Configured and resolved MDB path with file metadata |
 | `/setmdb <path>` | Update MDB path at runtime (no restart needed) |
 | `/tables` | List all tables in the MDB (diagnostic) |
+| `/download <ip>` | Read-only device snapshot + latest linked MDB punches (no write action) |
+| `/dbbackup` | Send a read-only copy of the MDB file |
+| `/importcsv` | Validate/preview uploaded CSV only; does not import into MDB |
+| `/autonmap` | Show UID→badge mapping suggestions only; does not persist |
+| `/shifts` | Read-only view of shift settings used by late/early checks |
+| `/workdays` | Read-only view of configured report days and fixed weekend rules |
 
 ---
 
@@ -446,6 +468,8 @@ Both timings are configurable in `config.ini` under `[notifications]`.
 ## Notes & Caveats
 
 - **MDB is read-only.** Middle East Attendance Software remains the single source of truth. The bot never writes to the database.
+- **Read-only adaptations.** `/importcsv`, `/autonmap`, `/download`, `/syncrange`, `/shifts`, and `/workdays` are implemented as read-only Telegram views/previews only; they do not persist changes.
+- **Backups are file copies only.** `/dbbackup` sends a copy of the MDB file for safekeeping and does not mutate the original MDB.
 - **Device user writes.** `/adduser` and `/usersync` write to ZKTeco devices only. Middle East Software picks up new users on its next "Download User Info" sync.
 - **Biometric enrollment** (fingerprint / face) must be performed physically on the device after adding a user.
 - **Weekend** = Friday + Saturday (UAE / Gulf calendar). Saturday (`weekday() == 5`) and Friday (`weekday() == 4`) are marked as weekends in all reports.

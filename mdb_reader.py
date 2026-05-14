@@ -601,3 +601,188 @@ def get_live_punches_since(since_ts: datetime) -> list:
             'device':    p['device'],
         })
     return result
+
+
+def get_early_today(shift_start: str = None) -> list:
+    if shift_start is None:
+        shift_start = _cfg.get('attendance', 'shift_start', fallback='07:30')
+    today = date.today()
+    punches = get_attendance(today, today)
+    uid_map = _uid_map()
+    excluded = _get_excluded_depts()
+    shift_t = datetime.strptime(shift_start, '%H:%M').time()
+
+    first = {}
+    for p in punches:
+        first.setdefault(p['uid'], p)
+
+    early = []
+    for uid, p in first.items():
+        emp = uid_map.get(uid)
+        if not emp or emp['dept'].upper() in excluded:
+            continue
+        pt = datetime.strptime(p['time'], '%H:%M:%S').time()
+        if pt < shift_t:
+            diff = (datetime.combine(today, shift_t) -
+                    datetime.combine(today, pt))
+            early.append({
+                'badge': emp['badge'], 'name': emp['name'],
+                'dept': emp['dept'], 'punch_time': p['time'],
+                'early_mins': int(diff.total_seconds() / 60),
+            })
+    return sorted(early, key=lambda x: x['early_mins'], reverse=True)
+
+
+def get_department_today(dept_query: str) -> dict:
+    q = (dept_query or '').strip().upper()
+    if not q:
+        return {'query': q, 'matches': []}
+    summary = get_today_summary()
+    matches = []
+    for dept, stats in summary['dept_stats'].items():
+        if q in (dept or '').upper():
+            present = [e for e in summary['present'] if e['dept'] == dept]
+            absent = [e for e in summary['absent'] if e['dept'] == dept]
+            matches.append({
+                'dept': dept,
+                'present': present,
+                'absent': absent,
+                'present_count': stats['present'],
+                'absent_count': stats['absent'],
+            })
+    return {'query': q, 'matches': matches, 'date': summary['date']}
+
+
+def get_sensor_punches(sensor_id: str, n: int = 10, days_back: int = 7) -> list:
+    today = date.today()
+    d_from = today - timedelta(days=max(1, days_back) - 1)
+    punches = get_attendance(d_from, today)
+    uid_map = _uid_map()
+    sid = (sensor_id or '').strip()
+    filtered = [p for p in punches if (p.get('device') or '').strip() == sid]
+    result = []
+    for p in sorted(filtered, key=lambda x: x['timestamp'], reverse=True)[:n]:
+        emp = uid_map.get(p['uid'])
+        result.append({
+            'badge': emp['badge'] if emp else p['uid'],
+            'name': emp['name'] if emp else 'Unknown',
+            'dept': emp['dept'] if emp else '—',
+            'time': p['time'],
+            'date': p['date'],
+            'device': p['device'],
+        })
+    return result
+
+
+def get_employee_report(badge: str, date_from: date, date_to: date,
+                        shift_start: str = None) -> dict:
+    emps = get_employees(active_only=False)
+    emp = next((e for e in emps if e['badge'] == badge.strip()), None)
+    if not emp:
+        raise ValueError(f"Badge {badge} not found.")
+
+    if shift_start is None:
+        shift_start = _cfg.get('attendance', 'shift_start', fallback='07:30')
+    shift_t = datetime.strptime(shift_start, '%H:%M').time()
+    punches = get_attendance(date_from, date_to, uid=emp['uid'])
+
+    by_date = {}
+    for p in punches:
+        by_date.setdefault(p['date'], []).append(p)
+
+    days = []
+    present_days = absent_days = late_days = early_days = 0
+    cur = date_from
+    while cur <= date_to:
+        is_weekend = cur.weekday() in (4, 5)
+        recs = by_date.get(cur, [])
+        first_t = recs[0]['time'] if recs else None
+        last_t = recs[-1]['time'] if recs else None
+        late_mins = early_mins = 0
+        if recs:
+            p_time = datetime.strptime(first_t, '%H:%M:%S').time()
+            if p_time > shift_t:
+                late_mins = int((datetime.combine(cur, p_time) -
+                                 datetime.combine(cur, shift_t)).total_seconds() / 60)
+            elif p_time < shift_t:
+                early_mins = int((datetime.combine(cur, shift_t) -
+                                  datetime.combine(cur, p_time)).total_seconds() / 60)
+        if not is_weekend:
+            if recs:
+                present_days += 1
+            else:
+                absent_days += 1
+            if late_mins > 0:
+                late_days += 1
+            if early_mins > 0:
+                early_days += 1
+        days.append({
+            'date': cur,
+            'is_weekend': is_weekend,
+            'punch_count': len(recs),
+            'first': first_t,
+            'last': last_t,
+            'late_mins': late_mins,
+            'early_mins': early_mins,
+        })
+        cur += timedelta(days=1)
+
+    return {
+        'employee': emp,
+        'from': date_from,
+        'to': date_to,
+        'shift_start': shift_start,
+        'present_days': present_days,
+        'absent_days': absent_days,
+        'late_days': late_days,
+        'early_days': early_days,
+        'days': days,
+    }
+
+
+def get_sync_range_summary(date_from: date, date_to: date) -> dict:
+    history = get_history(date_from, date_to)
+    rows = []
+    for day in history:
+        total = day['present_count'] + day['absent_count']
+        pct = round((day['present_count'] / total) * 100, 1) if total else 0
+        rows.append({
+            'date': day['date'],
+            'date_str': day['date_str'],
+            'weekday': day['weekday'],
+            'is_weekend': day['is_weekend'],
+            'present_count': day['present_count'],
+            'absent_count': day['absent_count'],
+            'total': total,
+            'present_pct': pct,
+        })
+    working = [r for r in rows if not r['is_weekend']]
+    working_days = len(working)
+    avg_pct = round(sum(r['present_pct'] for r in working) / working_days, 1) if working_days else 0
+    return {
+        'from': date_from,
+        'to': date_to,
+        'rows': rows,
+        'working_days': working_days,
+        'average_present_pct': avg_pct,
+    }
+
+
+def get_attendance_trend(days: int = 14) -> list:
+    days = max(3, min(days, 60))
+    today = date.today()
+    date_from = today - timedelta(days=max(days * 2, 14))
+    history = get_history(date_from, today)
+    working = [d for d in history if not d['is_weekend']]
+    out = []
+    for day in working[-days:]:
+        total = day['present_count'] + day['absent_count']
+        pct = round((day['present_count'] / total) * 100, 1) if total else 0
+        out.append({
+            'date': day['date'],
+            'date_str': day['date_str'],
+            'present_count': day['present_count'],
+            'absent_count': day['absent_count'],
+            'present_pct': pct,
+        })
+    return out

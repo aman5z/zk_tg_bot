@@ -9,6 +9,7 @@ Run: python bot.py
 import asyncio
 import calendar as _cal
 import configparser
+import html
 import logging
 import os
 import sys
@@ -152,6 +153,7 @@ def _fmt_today(summary: dict, mode: str = 'full') -> str:
 # ─── Interactive calendar state (per chat) ────────────────────────────────────
 
 _cal_state: dict = {}   # chat_id → {'badge', 'name', 'dept', ['range_from']}
+_importcsv_state: dict = {}  # chat_id → awaiting CSV upload (read-only preview)
 
 # ─── Interactive calendar keyboard builder ────────────────────────────────────
 
@@ -313,13 +315,18 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/absent — absent list only\n"
         "/present — present list only\n"
         "/late — late arrivals today\n"
+        "/early — early arrivals today\n"
         "/whoisin — currently inside building\n"
         "/feed — last 20 punches\n"
         "/latest — device status + last 2 MDB punches per device\n"
         "/week — this week summary\n"
         "/month — monthly dept summary\n"
         "/topabsent — most absent this month\n"
+        "/dept &lt;name&gt; — today's attendance by department\n"
+        "/employeereport &lt;badge&gt; — employee month-to-date report\n"
         "/history &lt;DD/MM/YYYY&gt; &lt;DD/MM/YYYY&gt; — range report\n"
+        "/syncrange &lt;DD/MM/YYYY&gt; &lt;DD/MM/YYYY&gt; — read-only range summary\n"
+        "/trend — attendance trend (last 14 working days)\n"
         "/report — send absent report (XLSX/PNG/PDF)\n\n"
         "<b>Employee</b>\n"
         "/search &lt;name or badge&gt; — find employee\n"
@@ -342,6 +349,12 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/mdbinfo — MDB path + file info\n"
         "/setmdb &lt;path&gt; — update MDB path\n"
         "/tables — list MDB tables (diagnostics)\n"
+        "/download &lt;ip&gt; — read-only device snapshot (no MDB write)\n"
+        "/dbbackup — send a read-only MDB file copy\n"
+        "/importcsv — upload CSV for validation/preview only\n"
+        "/autonmap — suggest UID→badge matches only (not saved)\n"
+        "/shifts — read-only shift configuration view\n"
+        "/workdays — read-only workday configuration view\n"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -397,6 +410,59 @@ async def cmd_late(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             lines.append(f"🔴 {e['name']} ({e['dept']})\n"
                          f"   Punched: {e['punch_time']} | Late: {e['late_mins']}m")
         await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+async def cmd_early(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    await update.message.reply_text('⏳ Checking...')
+    try:
+        early = mdb_reader.get_early_today()
+        if not early:
+            await update.message.reply_text('✅ No early arrivals before shift start today.')
+            return
+        lines = [f"🌅 <b>Early Arrivals — {date.today().strftime('%d/%m/%Y')}</b>\n"]
+        for e in early:
+            lines.append(f"🟢 {e['name']} ({e['dept']})\n"
+                         f"   Punched: {e['punch_time']} | Early: {e['early_mins']}m")
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+async def cmd_dept(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /dept <name>"""
+    if not _allowed(update):
+        return await _deny(update)
+    if not ctx.args:
+        await update.message.reply_text(
+            'Usage: /dept &lt;name&gt;\nExample: /dept Admin',
+            parse_mode=ParseMode.HTML)
+        return
+    query = ' '.join(ctx.args).strip()
+    await update.message.reply_text(f'⏳ Looking up department "{query}"...')
+    try:
+        result = mdb_reader.get_department_today(query)
+        matches = result.get('matches', [])
+        if not matches:
+            await update.message.reply_text(f'❌ No matching department found for "{query}".')
+            return
+        lines = [f"🏢 <b>Department Attendance — {result.get('date', '')}</b>\n"]
+        for item in matches:
+            total = item['present_count'] + item['absent_count']
+            lines.append(
+                f"\n<b>{item['dept']}</b>\n"
+                f"✅ Present: {item['present_count']}  ❌ Absent: {item['absent_count']}  👥 Total: {total}"
+            )
+            if item['absent']:
+                lines.append("Absent list:")
+                for emp in item['absent'][:30]:
+                    lines.append(f"  • {emp['name']} ({emp['badge']})")
+                if len(item['absent']) > 30:
+                    lines.append(f"  …and {len(item['absent']) - 30} more")
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
 
@@ -517,6 +583,81 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 lines.append(
                     f"{'🟢' if day['absent_count'] == 0 else '🟡'} "
                     f"{wd} {day['date_str']} — ✅{day['present_count']} ❌{day['absent_count']} /{total}")
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+async def cmd_syncrange(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /syncrange DD/MM/YYYY DD/MM/YYYY (read-only summary)."""
+    if not _allowed(update):
+        return await _deny(update)
+    if len(ctx.args) < 2:
+        await update.message.reply_text(
+            'Usage: /syncrange DD/MM/YYYY DD/MM/YYYY\n'
+            'Example: /syncrange 01/05/2026 13/05/2026')
+        return
+    try:
+        d_from = datetime.strptime(ctx.args[0], '%d/%m/%Y').date()
+        d_to = datetime.strptime(ctx.args[1], '%d/%m/%Y').date()
+    except ValueError:
+        await update.message.reply_text('❌ Date format: DD/MM/YYYY')
+        return
+    if (d_to - d_from).days > 31:
+        await update.message.reply_text('❌ Max range is 31 days.')
+        return
+    await update.message.reply_text(
+        f'⏳ Read-only sync preview for {ctx.args[0]} → {ctx.args[1]}...')
+    try:
+        data = mdb_reader.get_sync_range_summary(d_from, d_to)
+        lines = [
+            f"🔎 <b>Sync Range (Read-Only) — {ctx.args[0]} → {ctx.args[1]}</b>",
+            "No writes were made to MDB or devices.",
+            f"📈 Working-day average present: {data['average_present_pct']}%",
+            "",
+        ]
+        for row in data['rows']:
+            if row['is_weekend']:
+                lines.append(f"⬛ {row['weekday'][:3]} {row['date_str']} — Weekend")
+            else:
+                lines.append(
+                    f"{'🟢' if row['absent_count'] == 0 else '🟡'} "
+                    f"{row['weekday'][:3]} {row['date_str']} — "
+                    f"✅{row['present_count']} ❌{row['absent_count']} ({row['present_pct']}%)"
+                )
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+async def cmd_trend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /trend [working_days]"""
+    if not _allowed(update):
+        return await _deny(update)
+    days = 14
+    if ctx.args:
+        try:
+            days = int(ctx.args[0])
+        except ValueError:
+            await update.message.reply_text('❌ Usage: /trend [working_days]')
+            return
+    await update.message.reply_text('⏳ Building trend...')
+    try:
+        trend = mdb_reader.get_attendance_trend(days)
+        if not trend:
+            await update.message.reply_text('No trend data available.')
+            return
+        lines = [f"📈 <b>Attendance Trend — Last {len(trend)} Working Days</b>\n"]
+        prev = None
+        for row in trend:
+            arrow = '⏺'
+            if prev is not None:
+                arrow = '⬆️' if row['present_pct'] > prev else '⬇️' if row['present_pct'] < prev else '➡️'
+            lines.append(
+                f"{arrow} {row['date_str']}: {row['present_pct']}% "
+                f"(✅{row['present_count']} / ❌{row['absent_count']})"
+            )
+            prev = row['present_pct']
         for chunk in _split('\n'.join(lines)):
             await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
     except Exception as e:
@@ -1339,6 +1480,49 @@ async def cmd_punches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
 
+async def cmd_employeereport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /employeereport <badge>"""
+    if not _allowed(update):
+        return await _deny(update)
+    if not ctx.args:
+        await update.message.reply_text(
+            'Usage: /employeereport &lt;badge&gt;\nExample: /employeereport 1024',
+            parse_mode=ParseMode.HTML)
+        return
+    badge = ctx.args[0].strip()
+    today = date.today()
+    first_day = today.replace(day=1)
+    await update.message.reply_text('⏳ Building employee report...')
+    try:
+        rep = mdb_reader.get_employee_report(badge, first_day, today)
+        emp = rep['employee']
+        lines = [
+            f"👤 <b>Employee Report</b>",
+            f"{emp['name']} ({emp['badge']}) — {emp['dept']}",
+            f"📅 {first_day.strftime('%d/%m/%Y')} → {today.strftime('%d/%m/%Y')}",
+            f"🕐 Shift start: {rep['shift_start']}",
+            "",
+            (f"✅ Present days: {rep['present_days']}  "
+             f"❌ Absent days: {rep['absent_days']}  "
+             f"⏰ Late days: {rep['late_days']}  🌅 Early days: {rep['early_days']}"),
+            "",
+            "<b>Recent days:</b>",
+        ]
+        recent_days = [d for d in rep['days'] if not d['is_weekend']][-10:]
+        for d in recent_days:
+            if d['punch_count'] == 0:
+                lines.append(f"• {d['date'].strftime('%d/%m %a')}: ❌ Absent")
+                continue
+            tag = '⏰' if d['late_mins'] else '🌅' if d['early_mins'] else '✅'
+            lines.append(
+                f"• {d['date'].strftime('%d/%m %a')}: {tag} "
+                f"{d['first'] or '—'} → {d['last'] or '—'} ({d['punch_count']} punches)"
+            )
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
 async def cmd_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Usage: /calendar <badge> [YYYY-MM]
     Without YYYY-MM → interactive date/range picker with inline keyboard.
@@ -1817,6 +2001,211 @@ async def cmd_tables(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
 
+async def cmd_download(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /download <ip> (read-only adaptation)."""
+    if not _allowed(update):
+        return await _deny(update)
+    if not ctx.args:
+        await update.message.reply_text(
+            'Usage: /download &lt;ip&gt;\n'
+            'Read-only adaptation: device snapshot only (no MDB write).',
+            parse_mode=ParseMode.HTML)
+        return
+    ip = ctx.args[0].strip()
+    await update.message.reply_text(f'⏳ Read-only snapshot for device {ip}...')
+    try:
+        dev = zk_devices.get_device_by_ip(ip)
+        statuses = zk_devices.get_device_status()
+        status = next((s for s in statuses if s.get('ip') == ip), None)
+        candidates = [ip]
+        if '.' in ip:
+            candidates.append(ip.split('.')[-1])
+        punches = []
+        for cand in candidates:
+            punches = mdb_reader.get_sensor_punches(cand, n=10, days_back=7)
+            if punches:
+                break
+        lines = [
+            f"📥 <b>/download {ip} (Read-Only)</b>",
+            "No data was written to MDB.",
+            "",
+            f"Device in config: {'Yes' if dev else 'No'}",
+        ]
+        if status:
+            lines.append(f"Status: {'🟢 Online' if status.get('online') else '🔴 Offline'}")
+            if status.get('time'):
+                lines.append(f"Device time: {status['time']}")
+            if status.get('users') is not None:
+                lines.append(f"Users: {status['users']}")
+        if punches:
+            lines.append("")
+            lines.append("<b>Latest MDB punches linked to this device id:</b>")
+            for p in punches:
+                lines.append(
+                    f"• {p['date'].strftime('%d/%m')} {p['time']} — {p['name']} ({p['badge']})"
+                )
+        else:
+            lines.append("\nNo recent MDB punches matched this device id.")
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+async def cmd_dbbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Create/send read-only copy of the MDB file."""
+    if not _allowed(update):
+        return await _deny(update)
+    await update.message.reply_text('⏳ Preparing read-only MDB copy...')
+    try:
+        info = mdb_reader.get_mdb_info()
+        local_path = info.get('local_path')
+        if not info.get('accessible') or not local_path or not os.path.isfile(local_path):
+            await update.message.reply_text('❌ MDB is not accessible. Check /mdbinfo.')
+            return
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"mdb_backup_{stamp}.mdb"
+        with open(local_path, 'rb') as fh:
+            await update.message.reply_document(
+                document=fh,
+                filename=filename,
+                caption='📦 Read-only MDB copy. No database writes performed.'
+            )
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+async def cmd_importcsv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Read-only CSV preview/validation workflow."""
+    if not _allowed(update):
+        return await _deny(update)
+    chat_id = str(update.effective_chat.id)
+    _importcsv_state[chat_id] = True
+    await update.message.reply_text(
+        "📄 <b>CSV Preview Mode (Read-Only)</b>\n\n"
+        "Upload a CSV file now. I will only validate structure and show a preview.\n"
+        "No rows are imported and MDB is never modified.",
+        parse_mode=ParseMode.HTML
+    )
+
+async def cmd_autonmap(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Suggest UID→badge matches without persisting them."""
+    if not _allowed(update):
+        return await _deny(update)
+    await update.message.reply_text('⏳ Building read-only auto-map suggestions...')
+    try:
+        emps = mdb_reader.get_employees(active_only=False)
+        known = {e['badge'] for e in emps}
+        unknown = zk_devices.get_unknown_users(known)
+        if not unknown:
+            await update.message.reply_text('✅ No unknown device users found.')
+            return
+        by_name = {}
+        for e in emps:
+            key = ''.join(ch for ch in e['name'].lower() if ch.isalnum())
+            if key:
+                by_name.setdefault(key, []).append(e)
+
+        lines = [
+            "🧩 <b>Auto-map Suggestions (Read-Only)</b>",
+            "Suggestions are not saved to MDB or devices.",
+            "",
+        ]
+        shown = 0
+        for u in unknown[:30]:
+            raw_name = (u.get('name_on_device') or '').strip()
+            nkey = ''.join(ch for ch in raw_name.lower() if ch.isalnum())
+            cands = by_name.get(nkey, []) if nkey else []
+            line = (f"• UID:{u['uid']} ID:{u['user_id']} "
+                    f"({u['device_name']} {u['device_ip']})")
+            if cands:
+                top = cands[0]
+                line += f" → suggest [{top['badge']}] {top['name']} ({top['dept']})"
+            else:
+                line += " → no strong match"
+            lines.append(line)
+            shown += 1
+        if len(unknown) > shown:
+            lines.append(f"\n…and {len(unknown) - shown} more unknown users.")
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+async def cmd_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Read-only view of shift-related settings."""
+    if not _allowed(update):
+        return await _deny(update)
+    shift_start = _cfg.get('attendance', 'shift_start', fallback='07:30').strip()
+    await update.message.reply_text(
+        "🕐 <b>Shift Settings (Read-Only)</b>\n\n"
+        f"Shift start (for late/early): <b>{shift_start}</b>\n"
+        "Used by /late, /early, and /employeereport.\n"
+        "No configuration changes are made from this command.",
+        parse_mode=ParseMode.HTML
+    )
+
+async def cmd_workdays(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Read-only view of workday configuration."""
+    if not _allowed(update):
+        return await _deny(update)
+    days_raw = settings.get_daily_days()
+    day_nums = [int(d.strip()) for d in days_raw.split(',') if d.strip().isdigit()]
+    labels = ', '.join(_DAY_NAMES.get(d, str(d)) for d in day_nums) or '—'
+    await update.message.reply_text(
+        "📅 <b>Workdays (Read-Only)</b>\n\n"
+        f"Configured daily report days: <b>{labels}</b>\n"
+        "Attendance weekend in reports is fixed as: <b>Fri, Sat</b>.\n"
+        "No MDB or settings writes are performed.",
+        parse_mode=ParseMode.HTML
+    )
+
+async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Process CSV uploads for /importcsv preview mode only."""
+    if not _allowed(update):
+        return
+    chat_id = str(update.effective_chat.id)
+    if not _importcsv_state.get(chat_id):
+        return
+    doc = update.message.document
+    filename = (doc.file_name or '').strip()
+    if not filename.lower().endswith('.csv'):
+        await update.message.reply_text('❌ Please upload a .csv file (preview mode is still active).')
+        return
+    try:
+        tg_file = await doc.get_file()
+        data = await tg_file.download_as_bytearray()
+        text = bytes(data).decode('utf-8-sig')
+    except UnicodeDecodeError:
+        text = bytes(data).decode('latin-1')
+    except Exception as e:
+        await update.message.reply_text(f'❌ Failed to download CSV: {e}')
+        return
+
+    try:
+        df = pd.read_csv(BytesIO(text.encode('utf-8')), dtype=str)
+        columns = [str(c).strip() for c in df.columns]
+        preview = df.head(10).fillna('').astype(str)
+        cols_preview = ', '.join(columns[:20]) if columns else '—'
+        lines = [
+            "✅ <b>CSV Validation Complete (Read-Only)</b>",
+            f"File: <code>{html.escape(filename)}</code>",
+            f"Rows: {len(df)}",
+            f"Columns ({len(columns)}): {html.escape(cols_preview)}",
+            "",
+            "No data was imported into MDB.",
+        ]
+        if preview.empty:
+            lines.append("\nPreview: file has headers but no data rows.")
+        else:
+            preview_csv = html.escape(preview.to_csv(index=False).strip()[:2500])
+            lines.append("\n<b>Preview (first 10 rows):</b>")
+            lines.append("<code>" + preview_csv + "</code>")
+        for chunk in _split('\n'.join(lines)):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ CSV parse error: {e}')
+    finally:
+        _importcsv_state.pop(chat_id, None)
+
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
 def _split(text: str, limit: int = 4000) -> list:
@@ -1874,17 +2263,22 @@ def main():
         ('absent',      cmd_absent),
         ('present',     cmd_present),
         ('late',        cmd_late),
+        ('early',       cmd_early),
         ('whoisin',     cmd_whoisin),
         ('feed',        cmd_feed),
         ('latest',      cmd_latest),
         ('week',        cmd_week),
         ('month',       cmd_month),
         ('topabsent',   cmd_topabsent),
+        ('dept',        cmd_dept),
         ('history',     cmd_history),
+        ('syncrange',   cmd_syncrange),
+        ('trend',       cmd_trend),
         ('report',      cmd_report),
         # Employee
         ('search',      cmd_search),
         ('punches',     cmd_punches),
+        ('employeereport', cmd_employeereport),
         ('calendar',    cmd_calendar),
         # Devices
         ('devices',     cmd_devices),
@@ -1902,6 +2296,12 @@ def main():
         ('mdbinfo',     cmd_mdbinfo),
         ('setmdb',      cmd_setmdb),
         ('tables',      cmd_tables),
+        ('download',    cmd_download),
+        ('dbbackup',    cmd_dbbackup),
+        ('importcsv',   cmd_importcsv),
+        ('autonmap',    cmd_autonmap),
+        ('shifts',      cmd_shifts),
+        ('workdays',    cmd_workdays),
     ]
 
     for cmd, handler in handlers:
@@ -1915,6 +2315,7 @@ def main():
     # Text input handler (for edit panel awaiting states)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
                                    handle_text_input))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document_input))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
     logger.info('Bot running. Press Ctrl+C to stop.')
