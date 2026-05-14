@@ -552,6 +552,20 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _save_report_files_to_dir(files: dict, save_dir: str):
+    """Save report BytesIO buffers to *save_dir*. Logs errors but does not raise."""
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+        for fmt_key, (buf, filename) in files.items():
+            dest = os.path.join(save_dir, filename)
+            buf.seek(0)
+            with open(dest, 'wb') as fh:
+                fh.write(buf.read())
+            logger.info(f"Report saved to {dest}")
+    except OSError as e:
+        logger.error(f"Failed to save report to {save_dir}: {e}")
+
+
 async def _send_absent_report_callback(query: CallbackQuery, update: Update, report_date: date):
     """Build and send the absent report for *report_date* via a callback context."""
     try:
@@ -592,16 +606,7 @@ async def _send_absent_report_callback(query: CallbackQuery, update: Update, rep
         # Save report files to configured save directory
         save_dir = settings.get_report_save_dir()
         if save_dir:
-            try:
-                os.makedirs(save_dir, exist_ok=True)
-                for fmt_key, (buf, filename) in files.items():
-                    dest = os.path.join(save_dir, filename)
-                    buf.seek(0)
-                    with open(dest, 'wb') as fh:
-                        fh.write(buf.read())
-                    logger.info(f"Report saved to {dest}")
-            except OSError as e:
-                logger.error(f"Failed to save report to {save_dir}: {e}")
+            _save_report_files_to_dir(files, save_dir)
 
         await query.edit_message_text(
             f'✅ Report sent for {report_date.strftime("%d/%m/%Y")}')
@@ -666,16 +671,7 @@ async def _send_range_absent_reports_callback(
                         document=buf, filename=filename, caption=caption)
 
             if save_dir:
-                try:
-                    os.makedirs(save_dir, exist_ok=True)
-                    for fmt_key, (buf, filename) in files.items():
-                        dest = os.path.join(save_dir, filename)
-                        buf.seek(0)
-                        with open(dest, 'wb') as fh:
-                            fh.write(buf.read())
-                        logger.info(f"Report saved to {dest}")
-                except OSError as e:
-                    logger.error(f"Failed to save report to {save_dir}: {e}")
+                _save_report_files_to_dir(files, save_dir)
 
             sent += 1
         except Exception as e:

@@ -332,9 +332,13 @@ def build_absent_report(
         generated_at = now.strftime('%d-%m-%Y %I:%M%p')
         _file_time = now.strftime('%I.%M%p')
     else:
-        # Extract file-safe time portion from the display string (after first space)
-        _parts = generated_at.split(' ', 1)
-        _file_time = _parts[1].replace(':', '.') if len(_parts) > 1 else ''
+        # Extract file-safe time portion from the display string (after first space).
+        # Expected format: "DD-MM-YYYY HH:MMXM".  Fall back gracefully if unexpected.
+        try:
+            _time_str = generated_at.split(' ', 1)[1]
+            _file_time = _time_str.replace(':', '.')
+        except (IndexError, AttributeError):
+            _file_time = ''
 
     date_label = report_date.strftime('%d %B %Y')
     date_file  = report_date.strftime('%d-%m-%Y')
