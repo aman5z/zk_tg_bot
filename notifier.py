@@ -185,7 +185,7 @@ async def check_live_punches(bot: Bot):
             dev = p.get('device') or '?'
             await _send(
                 bot,
-                f"👆 <b>Live Punch</b>\n"
+                #f"👆 <b>Live Punch</b>\n"
                 f"🕐 {p['time']}  👤 {p['name']}\n"
                 f"🏷 Badge: {p['badge']}  🏢 {p['dept']}\n"
                 f"📡 Device: <code>{dev}</code>"
