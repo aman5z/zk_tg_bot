@@ -181,8 +181,7 @@ async def check_live_punches(bot: Bot):
         now   = datetime.now()
         since = _last_live_punch_ts or datetime(now.year, now.month, now.day, 0, 0, 0)
         new_punches = mdb_reader.get_live_punches_since(since)
-
-for p in new_punches:
+        for p in new_punches:
             dev = p.get('device') or '?'
             await _send(
                 bot,
