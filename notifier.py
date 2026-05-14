@@ -183,12 +183,10 @@ async def check_live_punches(bot: Bot):
         new_punches = mdb_reader.get_live_punches_since(since)
         for p in new_punches:
             dev = p.get('device') or '?'
-            await _send(
+await _send(
                 bot,
-                #f"👆 <b>Live Punch</b>\n"
-                f"🕐 {p['time']}  👤 {p['name']}\n"
-                f"🏷 Badge: {p['badge']}  🏢 {p['dept']}\n"
-                f"📡 Device: <code>{dev}</code>"
+                f"🏷️ {p['badge']}  👤 {p['name']}\n"
+                f"🕐 {p['time']}  📡 {dev}"
             )
             _last_live_punch_ts = p['timestamp']
     except Exception as e:
