@@ -774,6 +774,10 @@ def get_attendance_trend(days: int = 14) -> list:
     date_from = today - timedelta(days=days + 14)
     history = get_history(date_from, today)
     working = [d for d in history if not d['is_weekend']]
+    while len(working) < days and (today - date_from).days < 180:
+        date_from -= timedelta(days=7)
+        history = get_history(date_from, today)
+        working = [d for d in history if not d['is_weekend']]
     out = []
     for day in working[-days:]:
         total = day['present_count'] + day['absent_count']

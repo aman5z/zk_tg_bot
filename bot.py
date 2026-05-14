@@ -14,7 +14,7 @@ import logging
 import os
 import sys
 from datetime import date, datetime, timedelta
-from io import BytesIO
+from io import BytesIO, StringIO
 
 import pandas as pd
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -2046,8 +2046,9 @@ async def cmd_download(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             lines.append("")
             lines.append("<b>Latest MDB punches linked to this device id:</b>")
             for p in punches:
+                p_date = p['date'].strftime('%d/%m') if hasattr(p.get('date'), 'strftime') else str(p.get('date', ''))
                 lines.append(
-                    f"• {p['date'].strftime('%d/%m')} {p['time']} — {p['name']} ({p['badge']})"
+                    f"• {p_date} {p['time']} — {p['name']} ({p['badge']})"
                 )
         else:
             lines.append("\nNo recent MDB punches matched this device id.")
@@ -2186,7 +2187,7 @@ async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        df = pd.read_csv(BytesIO(text.encode('utf-8')), dtype=str)
+        df = pd.read_csv(StringIO(text), dtype=str)
         columns = [str(c).strip() for c in df.columns]
         preview = df.head(10).fillna('').astype(str)
         cols_preview = ', '.join(columns[:20]) if columns else '—'
