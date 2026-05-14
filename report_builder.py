@@ -330,21 +330,12 @@ def build_absent_report(
     if generated_at is None:
         now = datetime.now()
         generated_at = now.strftime('%d-%m-%Y %I:%M%p')
-        _file_time = now.strftime('%I.%M%p')
-    else:
-        # Extract file-safe time portion from the display string (after first space).
-        # Expected format: "DD-MM-YYYY HH:MMXM".  Fall back gracefully if unexpected.
-        try:
-            _time_str = generated_at.split(' ', 1)[1]
-            _file_time = _time_str.replace(':', '.')
-        except (IndexError, AttributeError):
-            _file_time = ''
 
     date_label = report_date.strftime('%d %B %Y')
     date_file  = report_date.strftime('%d-%m-%Y')
     title = f"Absent Report — {date_label}"
     subtitle = f"Report generated on: {generated_at}"
-    filename_base = f"{date_file} {_file_time} Attendance Report" if _file_time else f"{date_file} Attendance Report"
+    filename_base = f"{date_file} Attendance Report"
 
     fmt_set = {f.strip().lower() for f in formats.split(',')}
     send_all = 'all' in fmt_set
