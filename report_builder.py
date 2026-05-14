@@ -304,8 +304,9 @@ def build_absent_report(
     rows = _to_rows(emp_list)
 
     date_label = report_date.strftime('%d %B %Y')
-    date_file  = report_date.strftime('%d_%m_%Y')
+    date_file  = report_date.strftime('%d-%m-%Y')
     title = f"Absent Report — {date_label}"
+    filename_base = f"{date_file} Attendance Report"
 
     fmt_set = {f.strip().lower() for f in formats.split(',')}
     send_all = 'all' in fmt_set
@@ -314,12 +315,12 @@ def build_absent_report(
 
     if send_all or 'xlsx' in fmt_set:
         result['xlsx'] = (build_xlsx(rows, title, template),
-                          f'Absent_{date_file}.xlsx')
+                          f'{filename_base}.xlsx')
     if send_all or 'png' in fmt_set:
         result['png'] = (build_png(rows, title, template),
-                         f'Absent_{date_file}.png')
+                         f'{filename_base}.png')
     if send_all or 'pdf' in fmt_set:
         result['pdf'] = (build_pdf(rows, title, template),
-                         f'Absent_{date_file}.pdf')
+                         f'{filename_base}.pdf')
 
     return result
