@@ -328,13 +328,19 @@ def build_absent_report(
     rows = _to_rows(emp_list)
 
     if generated_at is None:
-        generated_at = datetime.now().strftime('%d-%m-%Y %H:%M')
+        now = datetime.now()
+        generated_at = now.strftime('%d-%m-%Y %I:%M%p')
+        _file_time = now.strftime('%I.%M%p')
+    else:
+        # Extract file-safe time portion from the display string (after first space)
+        _parts = generated_at.split(' ', 1)
+        _file_time = _parts[1].replace(':', '.') if len(_parts) > 1 else ''
 
     date_label = report_date.strftime('%d %B %Y')
     date_file  = report_date.strftime('%d-%m-%Y')
     title = f"Absent Report — {date_label}"
     subtitle = f"Report generated on: {generated_at}"
-    filename_base = f"{date_file} Attendance Report"
+    filename_base = f"{date_file} {_file_time} Attendance Report" if _file_time else f"{date_file} Attendance Report"
 
     fmt_set = {f.strip().lower() for f in formats.split(',')}
     send_all = 'all' in fmt_set

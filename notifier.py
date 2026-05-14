@@ -83,7 +83,7 @@ async def send_daily_report(
         summary = mdb_reader.get_today_summary()
         absent  = summary['absent']
         today   = date.today()
-        generated_at = datetime.now().strftime('%d-%m-%Y %H:%M')
+        generated_at = datetime.now().strftime('%d-%m-%Y %I:%M%p')
 
         dept_lines = []
         for dept, s in sorted(summary['dept_stats'].items()):
