@@ -539,7 +539,10 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 callback_data='rep:yesterday',
             ),
         ],
-        [InlineKeyboardButton('📆 Pick Date', callback_data='rep:pick')],
+        [
+            InlineKeyboardButton('📆 Pick Date',   callback_data='rep:pick'),
+            InlineKeyboardButton('📆 Date Range',  callback_data='rep:range'),
+        ],
         [InlineKeyboardButton('❌ Cancel',     callback_data='rep:cancel')],
     ])
     await update.message.reply_text(
@@ -547,6 +550,20 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard,
     )
+
+
+def _save_report_files_to_dir(files: dict, save_dir: str):
+    """Save report BytesIO buffers to *save_dir*. Logs errors but does not raise."""
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+        for fmt_key, (buf, filename) in files.items():
+            dest = os.path.join(save_dir, filename)
+            buf.seek(0)
+            with open(dest, 'wb') as fh:
+                fh.write(buf.read())
+            logger.info(f"Report saved to {dest}")
+    except OSError as e:
+        logger.error(f"Failed to save report to {save_dir}: {e}")
 
 
 async def _send_absent_report_callback(query: CallbackQuery, update: Update, report_date: date):
@@ -585,10 +602,89 @@ async def _send_absent_report_callback(query: CallbackQuery, update: Update, rep
             else:
                 await update.effective_chat.send_document(
                     document=buf, filename=filename, caption=caption)
+
+        # Save report files to configured save directory
+        save_dir = settings.get_report_save_dir()
+        if save_dir:
+            _save_report_files_to_dir(files, save_dir)
+
         await query.edit_message_text(
             f'✅ Report sent for {report_date.strftime("%d/%m/%Y")}')
     except Exception as e:
         await query.edit_message_text(f'❌ {e}')
+
+async def _send_range_absent_reports_callback(
+    query: CallbackQuery, update: Update, d_from_str: str, d_to_str: str
+):
+    """Build and send absent reports for every date in [d_from_str, d_to_str]."""
+    try:
+        d_from = datetime.strptime(d_from_str, '%Y-%m-%d').date()
+        d_to   = datetime.strptime(d_to_str,   '%Y-%m-%d').date()
+    except ValueError:
+        await query.edit_message_text('❌ Invalid date range.')
+        return
+
+    total_days = (d_to - d_from).days + 1
+    if total_days > 31:
+        await query.edit_message_text(
+            f'❌ Date range too large ({total_days} days). Please select at most 31 days.')
+        return
+
+    await query.edit_message_text(
+        f'⏳ Building reports for {d_from.strftime("%d/%m/%Y")} – {d_to.strftime("%d/%m/%Y")} '
+        f'({total_days} days)…')
+
+    depts    = settings.get_report_departments()
+    formats  = settings.get_report_formats()
+    template = settings.get_report_template()
+    save_dir = settings.get_report_save_dir()
+
+    sent   = 0
+    errors = []
+    current = d_from
+    while current <= d_to:
+        try:
+            history = mdb_reader.get_history(current, current)
+            if not history:
+                current += timedelta(days=1)
+                continue
+            absent = history[0]['absent']
+            if not absent:
+                current += timedelta(days=1)
+                continue
+
+            files = report_builder.build_absent_report(
+                absent=absent,
+                report_date=current,
+                departments=depts,
+                formats=formats,
+                template=template,
+            )
+            caption = (f'Absent list — {current.strftime("%d/%m/%Y")}'
+                       f'  ({len(absent)} absent)')
+            for fmt_key, (buf, filename) in files.items():
+                buf.seek(0)
+                if fmt_key == 'png':
+                    await update.effective_chat.send_photo(photo=buf, caption=caption)
+                else:
+                    await update.effective_chat.send_document(
+                        document=buf, filename=filename, caption=caption)
+
+            if save_dir:
+                _save_report_files_to_dir(files, save_dir)
+
+            sent += 1
+        except Exception as e:
+            errors.append(f'{current.strftime("%d/%m/%Y")}: {e}')
+
+        current += timedelta(days=1)
+
+    summary = (f'✅ Range report done: {d_from.strftime("%d/%m/%Y")} – {d_to.strftime("%d/%m/%Y")}\n'
+               f'📄 Reports sent: {sent}')
+    if errors:
+        summary += '\n⚠️ Errors:\n' + '\n'.join(errors[:5])
+    await update.effective_chat.send_message(summary)
+
 
 # ── /latest — latest MDB punches + live device times ─────────────────────────
 
@@ -699,12 +795,14 @@ def _fmt_report_panel() -> tuple:
     fmts     = settings.get_report_formats()
     tpl      = settings.get_report_template()
     tpl_label = REPORT_TEMPLATES.get(tpl, {}).get('label', tpl)
+    save_dir  = settings.get_report_save_dir() or '—'
 
     text = (
         f"📊 <b>On-Demand /report Settings</b>\n\n"
         f"📁 Departments: <b>{depts}</b>\n"
         f"📄 Formats: <b>{fmts.upper()}</b>\n"
-        f"🎨 Template: <b>{tpl_label}</b>"
+        f"🎨 Template: <b>{tpl_label}</b>\n"
+        f"💾 Save Dir: <code>{save_dir}</code>"
     )
     kb = InlineKeyboardMarkup([
         [
@@ -713,6 +811,7 @@ def _fmt_report_panel() -> tuple:
         ],
         [
             InlineKeyboardButton('🎨 Template',    callback_data='er:tmpl_menu'),
+            InlineKeyboardButton('💾 Save Dir',    callback_data='er:savedir'),
         ],
         [InlineKeyboardButton('✅ Done', callback_data='er:done')],
     ])
@@ -941,6 +1040,20 @@ async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=kb)
             return
 
+        if action == 'savedir':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']      = 'report'
+            st['awaiting'] = 'report_savedir'
+            current_dir = settings.get_report_save_dir() or '—'
+            await query.edit_message_text(
+                '💾 <b>Set Save Directory</b>\n\n'
+                f'Current: <code>{current_dir}</code>\n\n'
+                'Reply with the full path where reports should be saved.\n'
+                'Example: <code>C:\\Users\\admin\\Desktop\\Attendance</code>\n'
+                'Send <code>none</code> to disable saving.',
+                parse_mode=ParseMode.HTML)
+            return
+
     # ── Daily report panel ── (prefix 'ed:')
     if data.startswith('ed:'):
         action = data[3:]
@@ -1126,6 +1239,22 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML)
         return
 
+    if awaiting == 'report_savedir':
+        if text.lower() in ('none', 'clear', '—'):
+            settings.set_report_save_dir('')
+            st['awaiting'] = None
+            await update.message.reply_text(
+                '✅ Report save directory cleared. Files will not be saved locally.',
+                parse_mode=ParseMode.HTML)
+        else:
+            settings.set_report_save_dir(text)
+            st['awaiting'] = None
+            await update.message.reply_text(
+                f'✅ Report save directory set to:\n<code>{text}</code>\n\n'
+                f'Use /editreport to review all settings.',
+                parse_mode=ParseMode.HTML)
+        return
+
 # ── Employee commands ─────────────────────────────────────────────────────────
 
 async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1279,6 +1408,15 @@ async def callback_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb,
             )
             return
+        elif action == 'range':
+            today = date.today()
+            kb = _make_cal_keyboard(today.year, today.month, 'RF', '_rep_')
+            await query.edit_message_text(
+                '📊 <b>Absent Report — Date Range</b>\n\n📅 Select <b>start</b> date:',
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+            return
         else:
             return
         await query.edit_message_text(
@@ -1327,6 +1465,11 @@ async def callback_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             title = f'📅 <b>Select start date</b>\n👤 {name} ({badge})'
         elif mode == 'R':
             title = '📊 <b>Absent Report</b>\n\n📅 Select date:'
+        elif mode == 'RF':
+            title = '📊 <b>Absent Report — Date Range</b>\n\n📅 Select <b>start</b> date:'
+        elif mode == 'RT':
+            title = (f'📊 <b>Absent Report — Date Range</b>\n\n'
+                     f'📅 Select <b>end</b> date:\n⏩ From: {range_from}')
         else:
             title = (f'📅 <b>Select end date</b>\n👤 {name} ({badge})\n'
                      f'⏩ From: {range_from}')
@@ -1389,6 +1532,30 @@ async def callback_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f'⏳ Building report for {report_date.strftime("%d/%m/%Y")}…')
             await _send_absent_report_callback(query, update, report_date)
+
+        elif mode == 'RF':
+            # Report range — start date selected; show calendar for end date
+            year  = int(selected_date[:4])
+            month = int(selected_date[5:7])
+            kb    = _make_cal_keyboard(year, month, 'RT', '_rep_', selected_date)
+            await query.edit_message_text(
+                f'📊 <b>Absent Report — Date Range</b>\n\n'
+                f'📅 Select <b>end</b> date:\n⏩ From: {selected_date}',
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+
+        elif mode == 'RT':
+            # Report range — end date selected; build reports for the whole range
+            d_from_str = range_from
+            d_to_str   = selected_date
+            try:
+                if (datetime.strptime(d_from_str, '%Y-%m-%d') >
+                        datetime.strptime(d_to_str, '%Y-%m-%d')):
+                    d_from_str, d_to_str = d_to_str, d_from_str
+            except ValueError:
+                pass
+            await _send_range_absent_reports_callback(query, update, d_from_str, d_to_str)
         return
 
 async def _edit_or_followup(query, update: Update, text: str):

@@ -154,6 +154,25 @@ def get_daily_save_dir() -> str:
     return _cfg.get('daily_report', 'save_dir', fallback='').strip()
 
 
+def set_daily_save_dir(val: str):
+    _ensure('daily_report')
+    _cfg['daily_report']['save_dir'] = val
+    _save()
+
+
+# ─── On-demand /report save directory ────────────────────────────────────────
+
+def get_report_save_dir() -> str:
+    """Local directory where on-demand /report files are saved (empty = disabled)."""
+    return _cfg.get('report_settings', 'save_dir', fallback='').strip()
+
+
+def set_report_save_dir(val: str):
+    _ensure('report_settings')
+    _cfg['report_settings']['save_dir'] = val
+    _save()
+
+
 # ─── Live punch notifications ─────────────────────────────────────────────────
 
 def get_live_punches() -> bool:
