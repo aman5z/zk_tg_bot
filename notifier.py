@@ -122,6 +122,7 @@ async def send_daily_report(
             formats=formats,
             template=template,
             extra_exclude_badges=extra_exclude_badges,
+            generated_at=generated_at,
         )
 
         caption = f'Absent list — {today.strftime("%d/%m/%Y")}'

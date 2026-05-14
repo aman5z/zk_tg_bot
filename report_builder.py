@@ -5,7 +5,7 @@ Supports department-priority sorting and multiple visual templates.
 """
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
 
@@ -102,16 +102,20 @@ def _to_rows(emp_list: List[Dict]) -> List[Dict]:
 
 # ─── XLSX ─────────────────────────────────────────────────────────────────────
 
-def build_xlsx(rows: List[Dict], title: str = '', template: str = 'default') -> BytesIO:
+def build_xlsx(rows: List[Dict], title: str = '', template: str = 'default',
+               subtitle: str = '') -> BytesIO:
     tpl = TEMPLATES.get(template, TEMPLATES['default'])
     df = pd.DataFrame(rows, columns=['Badge', 'Name', 'Department'])
     buf = BytesIO()
 
+    # Determine how many header rows precede the column header
+    extra_rows = (1 if title else 0) + (1 if subtitle else 0)
+
     with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Absent', startrow=1 if title else 0)
+        df.to_excel(writer, index=False, sheet_name='Absent', startrow=extra_rows)
         ws = writer.sheets['Absent']
 
-        header_row = 2 if title else 1  # 1-indexed row where Badge/Name/Dept header lives
+        header_row = extra_rows + 1  # 1-indexed row where Badge/Name/Dept header lives
 
         # Optional title row
         if title:
@@ -125,6 +129,16 @@ def build_xlsx(rows: List[Dict], title: str = '', template: str = 'default') -> 
                 fill_type='solid')
             tc.alignment = Alignment(horizontal='center', vertical='center')
             ws.row_dimensions[1].height = 22
+
+        # Optional subtitle row (e.g. "Report generated on: …")
+        if subtitle:
+            subtitle_row = 2 if title else 1
+            ws.merge_cells(f'A{subtitle_row}:C{subtitle_row}')
+            sc = ws[f'A{subtitle_row}']
+            sc.value = subtitle
+            sc.font = Font(italic=True, size=10, color='444444')
+            sc.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[subtitle_row].height = 16
 
         # Style the Badge / Name / Department header row
         hdr_fill = PatternFill(
@@ -159,7 +173,8 @@ def build_xlsx(rows: List[Dict], title: str = '', template: str = 'default') -> 
 
 # ─── PNG ──────────────────────────────────────────────────────────────────────
 
-def build_png(rows: List[Dict], title: str = '', template: str = 'default') -> BytesIO:
+def build_png(rows: List[Dict], title: str = '', template: str = 'default',
+              subtitle: str = '') -> BytesIO:
     tpl = TEMPLATES.get(template, TEMPLATES['default'])
     n = len(rows)
 
@@ -202,11 +217,14 @@ def build_png(rows: List[Dict], title: str = '', template: str = 'default') -> B
             for i in range(n + 1):
                 tbl[i, j].set_width(w)
 
-    if title:
-        fig.suptitle(title, fontsize=11, fontweight='bold', y=0.99,
+    full_title = title
+    if subtitle:
+        full_title = f"{title}\n{subtitle}" if title else subtitle
+    if full_title:
+        fig.suptitle(full_title, fontsize=11, fontweight='bold', y=0.99,
                      color='#333333')
 
-    plt.tight_layout(rect=[0, 0, 1, 0.96 if title else 1.0])
+    plt.tight_layout(rect=[0, 0, 1, 0.96 if full_title else 1.0])
     buf = BytesIO()
     fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
                 facecolor='white', edgecolor='none')
@@ -220,8 +238,12 @@ def build_png(rows: List[Dict], title: str = '', template: str = 'default') -> B
 _ROWS_PER_PAGE = 48
 
 
-def build_pdf(rows: List[Dict], title: str = '', template: str = 'default') -> BytesIO:
+def build_pdf(rows: List[Dict], title: str = '', template: str = 'default',
+              subtitle: str = '') -> BytesIO:
     tpl = TEMPLATES.get(template, TEMPLATES['default'])
+    full_title = title
+    if subtitle:
+        full_title = f"{title}\n{subtitle}" if title else subtitle
     # When rows is empty produce a single empty page; otherwise paginate.
     if rows:
         pages = [rows[i:i + _ROWS_PER_PAGE]
@@ -239,7 +261,7 @@ def build_pdf(rows: List[Dict], title: str = '', template: str = 'default') -> B
             fig.patch.set_facecolor('white')
             ax.axis('off')
 
-            page_title = title
+            page_title = full_title
             if len(pages) > 1:
                 page_title += f'  (page {page_idx + 1}/{len(pages)})'
 
@@ -293,19 +315,25 @@ def build_absent_report(
     formats: str = 'xlsx',
     template: str = 'default',
     extra_exclude_badges: Optional[set] = None,
+    generated_at: Optional[str] = None,
 ) -> Dict[str, Tuple[BytesIO, str]]:
     """
     Build absent report in the requested format(s).
 
     Returns dict of  format_key → (BytesIO, filename).
     format_key values: 'xlsx', 'png', 'pdf'
+    generated_at: optional pre-formatted timestamp string; defaults to now.
     """
     emp_list = _sort_and_filter(absent, departments, extra_exclude_badges)
     rows = _to_rows(emp_list)
 
+    if generated_at is None:
+        generated_at = datetime.now().strftime('%d-%m-%Y %H:%M')
+
     date_label = report_date.strftime('%d %B %Y')
     date_file  = report_date.strftime('%d-%m-%Y')
     title = f"Absent Report — {date_label}"
+    subtitle = f"Report generated on: {generated_at}"
     filename_base = f"{date_file} Attendance Report"
 
     fmt_set = {f.strip().lower() for f in formats.split(',')}
@@ -314,13 +342,13 @@ def build_absent_report(
     result: Dict[str, Tuple[BytesIO, str]] = {}
 
     if send_all or 'xlsx' in fmt_set:
-        result['xlsx'] = (build_xlsx(rows, title, template),
+        result['xlsx'] = (build_xlsx(rows, title, template, subtitle=subtitle),
                           f'{filename_base}.xlsx')
     if send_all or 'png' in fmt_set:
-        result['png'] = (build_png(rows, title, template),
+        result['png'] = (build_png(rows, title, template, subtitle=subtitle),
                          f'{filename_base}.png')
     if send_all or 'pdf' in fmt_set:
-        result['pdf'] = (build_pdf(rows, title, template),
+        result['pdf'] = (build_pdf(rows, title, template, subtitle=subtitle),
                          f'{filename_base}.pdf')
 
     return result
