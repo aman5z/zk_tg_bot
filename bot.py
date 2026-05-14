@@ -1513,7 +1513,12 @@ async def cmd_employeereport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if d['punch_count'] == 0:
                 lines.append(f"• {d['date'].strftime('%d/%m %a')}: ❌ Absent")
                 continue
-            tag = '⏰' if d['late_mins'] else '🌅' if d['early_mins'] else '✅'
+            if d['late_mins']:
+                tag = '⏰'
+            elif d['early_mins']:
+                tag = '🌅'
+            else:
+                tag = '✅'
             lines.append(
                 f"• {d['date'].strftime('%d/%m %a')}: {tag} "
                 f"{d['first'] or '—'} → {d['last'] or '—'} ({d['punch_count']} punches)"

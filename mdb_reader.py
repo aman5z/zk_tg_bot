@@ -771,7 +771,7 @@ def get_sync_range_summary(date_from: date, date_to: date) -> dict:
 def get_attendance_trend(days: int = 14) -> list:
     days = max(3, min(days, 60))
     today = date.today()
-    date_from = today - timedelta(days=max(days * 2, 14))
+    date_from = today - timedelta(days=days + 14)
     history = get_history(date_from, today)
     working = [d for d in history if not d['is_weekend']]
     out = []
