@@ -820,11 +820,12 @@ def _fmt_report_panel() -> tuple:
 
 def _fmt_daily_panel() -> tuple:
     """Return (text, InlineKeyboardMarkup) for the /editdaily panel."""
-    depts   = settings.get_daily_departments()
-    fmts    = settings.get_daily_formats()
-    tpl     = settings.get_daily_template()
-    tpl_lbl = REPORT_TEMPLATES.get(tpl, {}).get('label', tpl)
-    exc     = settings.get_daily_exclude_badges() or '—'
+    depts    = settings.get_daily_departments()
+    fmts     = settings.get_daily_formats()
+    tpl      = settings.get_daily_template()
+    tpl_lbl  = REPORT_TEMPLATES.get(tpl, {}).get('label', tpl)
+    exc      = settings.get_daily_exclude_badges() or '—'
+    save_dir = settings.get_daily_save_dir() or '—'
 
     text = (
         f"⏰ <b>Daily Report Settings</b>\n\n"
@@ -833,7 +834,8 @@ def _fmt_daily_panel() -> tuple:
         f"📁 Departments: <b>{depts}</b>\n"
         f"📄 Formats: <b>{fmts.upper()}</b>\n"
         f"🎨 Template: <b>{tpl_lbl}</b>\n"
-        f"🚫 Extra excluded badges: <b>{exc}</b>"
+        f"🚫 Extra excluded badges: <b>{exc}</b>\n"
+        f"💾 Save Dir: <code>{save_dir}</code>"
     )
     kb = InlineKeyboardMarkup([
         [
@@ -848,7 +850,8 @@ def _fmt_daily_panel() -> tuple:
             InlineKeyboardButton('🎨 Template',    callback_data='ed:tmpl_menu'),
             InlineKeyboardButton('🚫 Exclusions',  callback_data='ed:exc'),
         ],
-        [InlineKeyboardButton('✅ Done', callback_data='ed:done')],
+        [InlineKeyboardButton('💾 Save Dir',       callback_data='ed:savedir')],
+        [InlineKeyboardButton('✅ Done',            callback_data='ed:done')],
     ])
     return text, kb
 
@@ -1179,6 +1182,20 @@ async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=kb)
             return
 
+        if action == 'savedir':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']      = 'daily'
+            st['awaiting'] = 'daily_savedir'
+            current_dir = settings.get_daily_save_dir() or '—'
+            await query.edit_message_text(
+                '💾 <b>Set Daily Report Save Directory</b>\n\n'
+                f'Current: <code>{current_dir}</code>\n\n'
+                'Reply with the full path where daily reports should be saved.\n'
+                'Example: <code>C:\\Users\\admin\\Desktop\\Attendance\\Auto Daily Attendance</code>\n'
+                'Send <code>none</code> to disable saving.',
+                parse_mode=ParseMode.HTML)
+            return
+
 
 # ── Text input handler for awaiting states ────────────────────────────────────
 
@@ -1252,6 +1269,22 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f'✅ Report save directory set to:\n<code>{text}</code>\n\n'
                 f'Use /editreport to review all settings.',
+                parse_mode=ParseMode.HTML)
+        return
+
+    if awaiting == 'daily_savedir':
+        if text.lower() in ('none', 'clear', '—'):
+            settings.set_daily_save_dir('')
+            st['awaiting'] = None
+            await update.message.reply_text(
+                '✅ Daily report save directory cleared. Files will not be saved locally.',
+                parse_mode=ParseMode.HTML)
+        else:
+            settings.set_daily_save_dir(text)
+            st['awaiting'] = None
+            await update.message.reply_text(
+                f'✅ Daily report save directory set to:\n<code>{text}</code>\n\n'
+                f'Use /editdaily to review all settings.',
                 parse_mode=ParseMode.HTML)
         return
 
