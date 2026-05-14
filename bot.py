@@ -2182,14 +2182,15 @@ async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         tg_file = await doc.get_file()
         data = await tg_file.download_as_bytearray()
+    except Exception as e:
+        await update.message.reply_text(f'❌ Failed to download CSV: {e}')
+        return
+    try:
         text = bytes(data).decode('utf-8-sig')
     except UnicodeDecodeError:
         logger.info(f'CSV {filename} not UTF-8, falling back to latin-1 decode.')
         text = bytes(data).decode('latin-1')
         used_latin1_fallback = True
-    except Exception as e:
-        await update.message.reply_text(f'❌ Failed to download CSV: {e}')
-        return
 
     try:
         df = pd.read_csv(StringIO(text), dtype=str)
@@ -2211,8 +2212,14 @@ async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for col in preview_display.columns:
                 preview_display[col] = preview_display[col].astype(str).str.slice(0, 40)
             preview_csv_lines = html.escape(preview_display.to_csv(index=False).strip()).splitlines()
-            while preview_csv_lines and len('\n'.join(preview_csv_lines)) > CSV_PREVIEW_MAX_CHARS:
-                preview_csv_lines.pop()
+            kept_lines, total_len = [], 0
+            for ln in preview_csv_lines:
+                add_len = len(ln) + (1 if kept_lines else 0)
+                if total_len + add_len > CSV_PREVIEW_MAX_CHARS:
+                    break
+                kept_lines.append(ln)
+                total_len += add_len
+            preview_csv_lines = kept_lines
             preview_csv = '\n'.join(preview_csv_lines)
             if used_latin1_fallback:
                 lines.append("\n⚠️ File was not UTF-8; decoded using latin-1 fallback.")
