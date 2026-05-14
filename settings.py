@@ -149,6 +149,11 @@ def set_daily_template(val: str):
     _save()
 
 
+def get_daily_save_dir() -> str:
+    """Local directory where daily report files are saved (empty = disabled)."""
+    return _cfg.get('daily_report', 'save_dir', fallback='').strip()
+
+
 # ─── Live punch notifications ─────────────────────────────────────────────────
 
 def get_live_punches() -> bool:

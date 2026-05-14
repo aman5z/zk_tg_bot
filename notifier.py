@@ -8,6 +8,7 @@ Scheduled Telegram notifications:
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, date
 from io import BytesIO
@@ -82,6 +83,7 @@ async def send_daily_report(
         summary = mdb_reader.get_today_summary()
         absent  = summary['absent']
         today   = date.today()
+        generated_at = datetime.now().strftime('%d-%m-%Y %H:%M')
 
         dept_lines = []
         for dept, s in sorted(summary['dept_stats'].items()):
@@ -95,7 +97,9 @@ async def send_daily_report(
         if not absent:
             await _send(
                 bot,
-                f"✅ <b>Daily Report — {summary['date']}</b>\n\nNo absences today! All staff present."
+                f"✅ <b>Daily Report — {summary['date']}</b>\n\n"
+                f"No absences today! All staff present.\n\n"
+                f"🕐 Report generated on: {generated_at}"
             )
             return
 
@@ -105,7 +109,8 @@ async def send_daily_report(
             f"👥 Total: {summary['total']} | "
             f"✅ Present: {summary['present_count']} | "
             f"❌ Absent: {summary['absent_count']}\n\n"
-            f"<b>By Department:</b>\n" + '\n'.join(dept_lines)
+            f"<b>By Department:</b>\n" + '\n'.join(dept_lines) +
+            f"\n\n🕐 Report generated on: {generated_at}"
         )
         await _send(bot, msg)
 
@@ -125,6 +130,20 @@ async def send_daily_report(
                 await _send_photo(bot, buf, caption=caption)
             else:
                 await _send_doc(bot, buf, filename=filename, caption=caption)
+
+        # Save report files to local directory if configured
+        save_dir = settings.get_daily_save_dir()
+        if save_dir:
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+                for fmt_key, (buf, filename) in files.items():
+                    dest = os.path.join(save_dir, filename)
+                    buf.seek(0)
+                    with open(dest, 'wb') as f:
+                        f.write(buf.read())
+                    logger.info(f"Report saved to {dest}")
+            except OSError as e:
+                logger.error(f"Failed to save report to {save_dir}: {e}")
 
     except Exception as e:
         logger.error(f"Daily report error: {e}")
