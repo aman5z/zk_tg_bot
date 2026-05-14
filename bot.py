@@ -915,6 +915,7 @@ _ALL_FORMATS = ['xlsx', 'png', 'pdf']
 # Prefix like 'er:dept:' = 8 chars, leaving 56 for dept name.
 # We cap at 50 chars to be safe.
 _MAX_DEPT_CALLBACK_LEN = 50
+CSV_PREVIEW_MAX_CHARS = 2500
 
 
 def _get_dept_list() -> list:
@@ -2181,6 +2182,7 @@ async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         data = await tg_file.download_as_bytearray()
         text = bytes(data).decode('utf-8-sig')
     except UnicodeDecodeError:
+        logger.info(f'CSV {filename} not UTF-8, falling back to latin-1 decode.')
         text = bytes(data).decode('latin-1')
     except Exception as e:
         await update.message.reply_text(f'❌ Failed to download CSV: {e}')
@@ -2202,7 +2204,7 @@ async def handle_document_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if preview.empty:
             lines.append("\nPreview: file has headers but no data rows.")
         else:
-            preview_csv = html.escape(preview.to_csv(index=False).strip()[:2500])
+            preview_csv = html.escape(preview.to_csv(index=False).strip()[:CSV_PREVIEW_MAX_CHARS])
             lines.append("\n<b>Preview (first 10 rows):</b>")
             lines.append("<code>" + preview_csv + "</code>")
         for chunk in _split('\n'.join(lines)):

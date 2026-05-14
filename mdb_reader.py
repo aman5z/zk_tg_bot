@@ -16,6 +16,8 @@ from calendar import monthrange
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+DEFAULT_SHIFT_START = '07:30'
+TREND_INITIAL_BUFFER_DAYS = 14
 
 _cfg = configparser.ConfigParser()
 _cfg.read(os.path.join(os.path.dirname(__file__), 'config.ini'))
@@ -605,7 +607,7 @@ def get_live_punches_since(since_ts: datetime) -> list:
 
 def get_early_today(shift_start: str = None) -> list:
     if shift_start is None:
-        shift_start = _cfg.get('attendance', 'shift_start', fallback='07:30')
+        shift_start = _cfg.get('attendance', 'shift_start', fallback=DEFAULT_SHIFT_START)
     today = date.today()
     punches = get_attendance(today, today)
     uid_map = _uid_map()
@@ -682,7 +684,7 @@ def get_employee_report(badge: str, date_from: date, date_to: date,
         raise ValueError(f"Badge {badge} not found.")
 
     if shift_start is None:
-        shift_start = _cfg.get('attendance', 'shift_start', fallback='07:30')
+        shift_start = _cfg.get('attendance', 'shift_start', fallback=DEFAULT_SHIFT_START)
     shift_t = datetime.strptime(shift_start, '%H:%M').time()
     punches = get_attendance(date_from, date_to, uid=emp['uid'])
 
@@ -771,7 +773,7 @@ def get_sync_range_summary(date_from: date, date_to: date) -> dict:
 def get_attendance_trend(days: int = 14) -> list:
     days = max(3, min(days, 60))
     today = date.today()
-    date_from = today - timedelta(days=days + 14)
+    date_from = today - timedelta(days=days + TREND_INITIAL_BUFFER_DAYS)
     history = get_history(date_from, today)
     working = [d for d in history if not d['is_weekend']]
     while len(working) < days and (today - date_from).days < 180:
