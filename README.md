@@ -513,6 +513,8 @@ All email configuration is managed entirely through this Telegram command — no
 | Recipients | 👥 Recipients | Add or remove email addresses. Tap ❌ next to an address to remove it. |
 | Subject | 📝 Subject | Email subject line; `{date}` is replaced with the report date at send time. |
 | Format | 📄 Format | `HTML` (styled table), `PLAIN` (plain text), or `BOTH` (multipart/alternative with both). |
+| Send time | 🕐 Send Time | Set daily email send time in `HH:MM` 24-hour format. Updates `daily_report_hour` / `daily_report_minute`. |
+| Send days | 📆 Send Days | Toggle days (`Mon`..`Sun`) when scheduled email is sent. Saves to daily report days config. |
 | Send Now | 📨 Send Now | Immediately send the today's absent report email to all configured recipients. Useful for testing. |
 
 ---

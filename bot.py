@@ -345,7 +345,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/livepunches — toggle live punch notifications on/off\n"
         "/editreport — configure on-demand /report settings\n"
         "/editdaily — configure scheduled daily report settings\n"
-        "/editemail — configure Gmail SMTP email delivery (optional)\n"
+        "/editemail — configure Gmail SMTP email delivery, send time, and days (optional)\n"
         "/mail — send attendance report via email (today or pick date)\n\n"
         "<b>Database</b>\n"
         "/stats — MDB stats\n"
@@ -919,6 +919,7 @@ async def cmd_livepunches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 _edit_state: dict = {}   # chat_id → {'ctx': 'report'|'daily', 'awaiting': None|'time'|'exc'}
 
 _ALL_FORMATS = ['xlsx', 'png', 'pdf']
+_DEFAULT_DAILY_DAYS = '0,1,2,3,6'
 # Telegram callback_data has a 64-byte limit.
 # Prefix like 'er:dept:' = 8 chars, leaving 56 for dept name.
 # We cap at 50 chars to be safe.
@@ -1066,7 +1067,7 @@ def _tmpl_menu_kb(ctx_key: str, current: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _days_menu_kb(current: str) -> InlineKeyboardMarkup:
+def _days_menu_kb(current: str, ctx_key: str = 'ed') -> InlineKeyboardMarkup:
     selected = {int(d.strip()) for d in current.split(',')
                 if d.strip().isdigit()}
     rows = []
@@ -1075,12 +1076,12 @@ def _days_menu_kb(current: str) -> InlineKeyboardMarkup:
         checked = day_num in selected
         btns.append(InlineKeyboardButton(
             f"{'✅' if checked else '⬜'} {day_name}",
-            callback_data=f'ed:day:{day_num}',
+            callback_data=f'{ctx_key}:day:{day_num}',
         ))
     # 3 per row
     for i in range(0, len(btns), 3):
         rows.append(btns[i:i + 3])
-    rows.append([InlineKeyboardButton('← Back', callback_data='ed:back')])
+    rows.append([InlineKeyboardButton('← Back', callback_data=f'{ctx_key}:back')])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1111,7 +1112,9 @@ def _fmt_email_panel() -> tuple:
     text = (
         f"📧 <b>Email (SMTP) Settings</b>\n\n"
         f"🔌 SMTP: <b>{'ENABLED' if settings.get_smtp_enabled() else 'DISABLED'}</b>\n"
-        f"📅 Daily email: <b>{'ENABLED' if settings.get_smtp_daily_enabled() else 'DISABLED'}</b>\n\n"
+        f"📅 Daily email: <b>{'ENABLED' if settings.get_smtp_daily_enabled() else 'DISABLED'}</b>\n"
+        f"🕐 Send time: <b>{settings.daily_time_label()}</b>\n"
+        f"📆 Send days: <b>{settings.daily_days_label()}</b>\n\n"
         f"📤 Sender: <code>{sender}</code>\n"
         f"👤 Name: <b>{name}</b>\n"
         f"🔑 Password: <b>{password_ok}</b>\n"
@@ -1139,6 +1142,10 @@ def _fmt_email_panel() -> tuple:
         [
             InlineKeyboardButton('📝 Subject',     callback_data='ee:subject'),
             InlineKeyboardButton('📄 Format',      callback_data='ee:fmt_menu'),
+        ],
+        [
+            InlineKeyboardButton('🕐 Send Time',   callback_data='ee:time'),
+            InlineKeyboardButton('📆 Send Days',   callback_data='ee:days_menu'),
         ],
         [
             InlineKeyboardButton('📨 Send Now',    callback_data='ee:send_now'),
@@ -1475,7 +1482,7 @@ async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 sel.discard(day_num)
             else:
                 sel.add(day_num)
-            settings.set_daily_days(','.join(str(d) for d in sorted(sel)) if sel else '0,1,2,3,6')
+            settings.set_daily_days(','.join(str(d) for d in sorted(sel)) if sel else _DEFAULT_DAILY_DAYS)
             kb = _days_menu_kb(settings.get_daily_days())
             await query.edit_message_reply_markup(reply_markup=kb)
             return
@@ -1660,6 +1667,42 @@ async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML, reply_markup=kb)
             return
 
+        if action == 'time':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']      = 'email'
+            st['awaiting'] = 'email_time'
+            current = settings.daily_time_label()
+            await query.edit_message_text(
+                '🕐 <b>Set Email Send Time</b>\n\n'
+                f'Current: <b>{current}</b>\n\n'
+                'Reply with the new time in <b>HH:MM</b> format (24h, zero-padded).\n'
+                'Example: <code>08:15</code>',
+                parse_mode=ParseMode.HTML)
+            return
+
+        if action == 'days_menu':
+            kb = _days_menu_kb(settings.get_daily_days(), 'ee')
+            await query.edit_message_text(
+                '📆 <b>Select Email Send Days</b>\n(tap to toggle)',
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action.startswith('day:'):
+            day_num = int(action[4:])
+            current = settings.get_daily_days()
+            sel = {int(d.strip()) for d in current.split(',') if d.strip().isdigit()}
+            if day_num in sel:
+                sel.discard(day_num)
+            else:
+                sel.add(day_num)
+            settings.set_daily_days(','.join(str(d) for d in sorted(sel)) if sel else _DEFAULT_DAILY_DAYS)
+            kb = _days_menu_kb(settings.get_daily_days(), 'ee')
+            await query.edit_message_reply_markup(reply_markup=kb)
+            await query.message.reply_text(
+                f'✅ Email send days updated to: <b>{settings.daily_days_label()}</b>',
+                parse_mode=ParseMode.HTML)
+            return
+
         if action.startswith('fmt:'):
             val = action[4:].strip().lower()
             if val in _EMAIL_FORMATS:
@@ -1803,6 +1846,31 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f'✅ Sender email set to <code>{text}</code>\n'
             'Use /editemail to review all settings.',
             parse_mode=ParseMode.HTML)
+        return
+
+    if awaiting == 'email_time':
+        try:
+            parts = text.split(':')
+            if len(parts) != 2:
+                raise ValueError('wrong format')
+            hh, mm = parts[0].strip(), parts[1].strip()
+            if len(hh) != 2 or len(mm) != 2 or not hh.isdigit() or not mm.isdigit():
+                raise ValueError('wrong format')
+            h, m = int(hh), int(mm)
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError('out of range')
+            settings.set_daily_hour(h)
+            settings.set_daily_minute(m)
+            st['awaiting'] = None
+            await update.message.reply_text(
+                f'✅ Email send time set to <b>{h:02d}:{m:02d}</b>\n'
+                'Use /editemail to review all settings.',
+                parse_mode=ParseMode.HTML)
+        except ValueError:
+            await update.message.reply_text(
+                '❌ Invalid format. Please send time as <code>HH:MM</code> (24h, zero-padded), '
+                'e.g. <code>08:15</code>.',
+                parse_mode=ParseMode.HTML)
         return
 
     if awaiting == 'email_sender_name':
