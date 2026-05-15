@@ -919,6 +919,7 @@ async def cmd_livepunches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 _edit_state: dict = {}   # chat_id → {'ctx': 'report'|'daily', 'awaiting': None|'time'|'exc'}
 
 _ALL_FORMATS = ['xlsx', 'png', 'pdf']
+_DEFAULT_DAILY_DAYS = '0,1,2,3,6'
 # Telegram callback_data has a 64-byte limit.
 # Prefix like 'er:dept:' = 8 chars, leaving 56 for dept name.
 # We cap at 50 chars to be safe.
@@ -1481,7 +1482,7 @@ async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 sel.discard(day_num)
             else:
                 sel.add(day_num)
-            settings.set_daily_days(','.join(str(d) for d in sorted(sel)) if sel else '0,1,2,3,6')
+            settings.set_daily_days(','.join(str(d) for d in sorted(sel)) if sel else _DEFAULT_DAILY_DAYS)
             kb = _days_menu_kb(settings.get_daily_days())
             await query.edit_message_reply_markup(reply_markup=kb)
             return
@@ -1694,7 +1695,7 @@ async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 sel.discard(day_num)
             else:
                 sel.add(day_num)
-            settings.set_daily_days(','.join(str(d) for d in sorted(sel)) if sel else '0,1,2,3,6')
+            settings.set_daily_days(','.join(str(d) for d in sorted(sel)) if sel else _DEFAULT_DAILY_DAYS)
             kb = _days_menu_kb(settings.get_daily_days(), 'ee')
             await query.edit_message_reply_markup(reply_markup=kb)
             await query.message.reply_text(
@@ -1867,7 +1868,8 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML)
         except Exception:
             await update.message.reply_text(
-                '❌ Invalid format. Please send time as <code>HH:MM</code> (24h), e.g. <code>08:15</code>.',
+                '❌ Invalid format. Please send time as <code>HH:MM</code> (24h, zero-padded), '
+                'e.g. <code>08:15</code>.',
                 parse_mode=ParseMode.HTML)
         return
 
