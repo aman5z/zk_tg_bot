@@ -16,6 +16,8 @@ No web dashboard, no Flask, no SQLite — pure Telegram interface.
   - [zk\_devices.py](#zk_devicespy)
   - [notifier.py](#notifierpy)
   - [email\_sender.py](#email_senderpy)
+  - [report\_builder.py](#report_builderpy)
+  - [settings.py](#settingspy)
   - [config.ini](#configini)
 - [Setup](#setup)
 - [Configuration Reference](#configuration-reference)
@@ -131,6 +133,17 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_workdays` | `/workdays` | Read-only workday/report-days configuration view. |
 | `cmd_editemail` | `/editemail` | Opens the Gmail SMTP settings panel (inline keyboard). Configure sender, App Password, recipients, subject, format, and schedule. Disabled by default — pure Telegram users are unaffected. |
 | `cmd_mail` | `/mail` | Interactive prompt to send an attendance report by email — choose **Today** or **Pick Date** (calendar picker). Requires SMTP to be enabled via `/editemail`. |
+| `cmd_latest` | `/latest` | Pings all devices and shows the last 2 MDB punches per device (grouped by SENSORID), plus MDB last-modified time. |
+| `cmd_livepunches` | `/livepunches` | Toggles per-punch live Telegram notifications on/off. Persists to `config.ini` via `settings`. |
+| `cmd_editreport` | `/editreport` | Interactive inline panel — configure on-demand `/report` settings (departments, format, template, save directory). |
+| `cmd_editdaily` | `/editdaily` | Interactive inline panel — configure scheduled daily report settings (time, days, departments, format, template, save directory). |
+| `cmd_admin` | `/admin` | Opens the admin inline keyboard panel (Shell, SQL, Audit, Presence, Config, Users, Device, Notice). |
+| `cmd_presence` | `/presence`, `/status` | Shows last seen timestamp and last activity for each authorised Telegram user. |
+| `cmd_auditlog` | `/auditlog [N\|YYYY-MM-DD]` | Reads `audit.log` and returns the last N entries or all entries matching a date. |
+| `cmd_shell` | `/shell` | Prompts for `shell_password` then opens a whitelist-only, timeout-limited shell session. Locked out after repeated failures. |
+| `cmd_su` | `/su` | Elevates an active shell session using `shell_root_password`, adding `journalctl` to the whitelist. |
+| `cmd_exit` | `/exit` | Ends the active shell session or SQL prompt for the calling user. |
+| `cmd_sql` | `/sql <SELECT ...>` | Read-only SQL console. Only simple `SELECT … FROM … [WHERE …] [LIMIT N]` queries; result is formatted text or CSV, bounded by `sql_max_rows` and `sql_max_text_chars`. |
 | `unknown_cmd` | *(any other command)* | Replies with `❓ Unknown command. Send /help for list.` |
 
 #### Main entry
@@ -293,6 +306,77 @@ Optional Gmail SMTP module. All functions use only the Python standard library (
 
 ---
 
+### report\_builder.py
+
+Builds attendance reports in **XLSX**, **PNG**, and **PDF** formats with themed colour templates and department-priority sorting.
+
+#### Constants
+
+| Name | Description |
+|------|-------------|
+| `TEMPLATES` | Dict of named colour themes (`default` = Blue, `dark` = Navy, `green` = School Green). Each theme specifies header background, header text, even/odd row colours, and border colour. |
+| `DEPT_ORDER` | Priority sort list — `TEACHING`, `ADMIN`, `SUPPORT`, `DRIVER`, `CLEANING STAFF` appear first; remaining departments are sorted alphabetically. |
+
+#### Build functions
+
+| Function | Description |
+|----------|-------------|
+| `build_xlsx(rows, title, template, subtitle)` | Returns a styled in-memory XLSX (`BytesIO`) with a title row, subtitle row, coloured header, and alternating row fill. |
+| `build_png(rows, title, template, subtitle)` | Returns a PNG image (`BytesIO`) of the absent table rendered with `matplotlib`. Shows "All present" text when the list is empty. |
+| `build_pdf(rows, title, template, subtitle)` | Returns a PDF (`BytesIO`) of the absent table using `matplotlib`'s `PdfPages` backend. |
+| `build_report(absent, departments, template, title, subtitle, formats, extra_exclude_badges)` | High-level entry point. Filters and sorts `absent` list, then calls the relevant `build_*` functions for each requested format, returning a list of `(BytesIO, filename, mime_type)` tuples. |
+
+---
+
+### settings.py
+
+Centralised runtime settings module. All components read and write shared configuration through this module so every part of the bot sees consistent values. Changes are persisted to `config.ini` immediately.
+
+#### Employee exclusions
+
+| Function | Description |
+|----------|-------------|
+| `get_excluded_badges()` | Returns the set of globally excluded badge numbers from `[employees] exclude_badges`. |
+| `set_excluded_badges(badges)` | Saves the updated set of excluded badge numbers to `config.ini`. |
+
+#### On-demand `/report` settings (`[report_settings]`)
+
+| Function | Description |
+|----------|-------------|
+| `get_report_departments()` | `'ALL'` or comma-separated department names. |
+| `set_report_departments(val)` | Persists the value to `config.ini`. |
+| `get_report_formats()` | Comma-separated format list: `xlsx`, `png`, `pdf`, or `all`. |
+| `set_report_formats(val)` | Persists. |
+| `get_report_template()` | Active colour template name (`default`, `dark`, or `green`). |
+| `set_report_template(val)` | Persists. |
+| `get_report_save_dir()` | Local directory where on-demand report files are saved (empty = disabled). |
+| `set_report_save_dir(val)` | Persists. |
+
+#### Scheduled daily report settings (`[daily_report]` and `[notifications]`)
+
+| Function | Description |
+|----------|-------------|
+| `get_daily_hour()` / `set_daily_hour(val)` | Hour of the scheduled daily report (24h). |
+| `get_daily_minute()` / `set_daily_minute(val)` | Minute of the scheduled daily report. |
+| `get_daily_days()` / `set_daily_days(val)` | Comma-separated day numbers (`0`=Mon…`6`=Sun). UAE default: `0,1,2,3,6`. |
+| `get_daily_departments()` / `set_daily_departments(val)` | Departments for the daily report (`ALL` or comma-separated names). |
+| `get_daily_exclude_badges()` / `set_daily_exclude_badges(val)` | Extra badge exclusions for the daily report beyond the global list. |
+| `get_daily_formats()` / `set_daily_formats(val)` | Output formats for the daily report. |
+| `get_daily_template()` / `set_daily_template(val)` | Colour template for the daily report. |
+| `get_daily_save_dir()` / `set_daily_save_dir(val)` | Local directory where daily report files are saved (empty = disabled). |
+
+#### Other settings
+
+| Function | Description |
+|----------|-------------|
+| `get_live_punches()` / `set_live_punches(val)` | Per-punch live Telegram notifications toggle. |
+| `get_device_timeout()` / `set_device_timeout(val)` | ZKTeco connection timeout in seconds. |
+| `get_devices()` | Returns the device list from `[devices]` as a list of `{ip, name, port, timeout}` dicts. |
+| `save_devices(devices)` | Writes the full device list back to `[devices]` in `config.ini`. |
+| `get_smtp_*` / `set_smtp_*` | Getters and setters for all SMTP settings (`enabled`, `daily_email_enabled`, `sender_email`, `sender_name`, `app_password`, `recipients`, `subject`, `format`). |
+
+---
+
 ### config.ini
 
 All runtime settings. Edit before first run.
@@ -342,6 +426,23 @@ recipients           =                # comma-separated recipient addresses
 subject              = Daily Absent Report - {date}  # {date} is replaced at send time
 format               = html           # html | plain | both (multipart/alternative)
 
+[employees]
+exclude_badges =                      # comma-separated badge numbers to exclude globally from all reports
+
+[report_settings]
+departments = ALL                     # ALL or comma-separated dept names for on-demand /report
+formats     = xlsx                    # xlsx | png | pdf | all (comma-separated)
+template    = default                 # default | dark | green
+save_dir    =                         # local directory to also save the file (leave empty to disable)
+
+[daily_report]
+days        = 0,1,2,3,6              # days to send (0=Mon…6=Sun; UAE default Sun–Thu = 0,1,2,3,6)
+departments = ALL                     # ALL or comma-separated dept names for scheduled daily report
+exclude_badges =                      # extra badge exclusions for daily report beyond global list
+formats     = xlsx                    # output formats for daily report
+template    = default                 # colour template for daily report
+save_dir    =                         # local directory to also save daily report files (leave empty to disable)
+
 [security]
 shell_password              =          # required for /shell (bot-specific password, not system password)
 shell_root_password         =          # optional second password for /su elevation
@@ -387,6 +488,7 @@ pip install -r requirements.txt
 | `pyzk` | ≥ 0.9 | ZKTeco device communication |
 | `pandas` | ≥ 2.0.0 | XLSX report generation |
 | `openpyxl` | ≥ 3.1.0 | Excel writer backend for pandas |
+| `matplotlib` | ≥ 3.7.0 | PNG and PDF report generation |
 
 ### 3. Mount the MDB share
 
@@ -462,6 +564,7 @@ sudo journalctl -u zkbot -f    # live logs
 | `/early` | Employees whose first punch was before shift start, sorted by minutes early |
 | `/whoisin` | Employees currently inside (checked in but not checked out) |
 | `/feed` | Last 20 punches today |
+| `/latest` | Device ping status + last 2 MDB punches per device (grouped by sensor ID) |
 | `/week` | Day-by-day summary for the current work week (Sun → today) |
 | `/month` | Per-department attendance percentage, month to date |
 | `/topabsent` | Top 10 most-absent employees this month |
