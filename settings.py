@@ -226,7 +226,6 @@ def get_devices() -> list:
 
 def save_devices(devices: list):
     _ensure('devices')
-    current_port = _cfg.getint('devices', 'port', fallback=4370)
     clean = []
     for i, dev in enumerate(devices):
         clean.append({
@@ -237,7 +236,7 @@ def save_devices(devices: list):
     _cfg['devices']['ips'] = ','.join(d['ip'] for d in clean)
     _cfg['devices']['names'] = ','.join(d['name'] for d in clean)
     _cfg['devices']['ports'] = ','.join(str(d['port']) for d in clean)
-    _cfg['devices']['port'] = str(clean[0]['port'] if clean else current_port)
+    _cfg['devices']['port'] = str(clean[0]['port'] if clean else 4370)
     _save()
 
 

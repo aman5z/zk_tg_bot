@@ -2569,7 +2569,7 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             if action == 'rename' or step == 'name':
                 try:
-                    new_name = _validate_device_name(text, devices, exclude_idx=idx)
+                    new_name = _validate_device_name(text, devices, exclude_index=idx)
                 except ValueError as exc:
                     await update.message.reply_text(f'❌ {exc}')
                     return
@@ -2588,7 +2588,7 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             if step == 'ip':
                 try:
-                    new_ip = _validate_device_ip(text, devices, exclude_idx=idx)
+                    new_ip = _validate_device_ip(text, devices, exclude_index=idx)
                 except ValueError as exc:
                     await update.message.reply_text(f'❌ {exc}')
                     return
@@ -3229,26 +3229,26 @@ def _get_device_by_index(idx: int) -> dict:
     return devices[idx]
 
 
-def _validate_device_ip(ip_text: str, devices: list, exclude_idx: int = None) -> str:
+def _validate_device_ip(ip_text: str, devices: list, exclude_index: int = None) -> str:
     ip = ip_text.strip()
     try:
         ipaddress.ip_address(ip)
     except ValueError:
         raise ValueError('Please send a valid IPv4/IPv6 address.')
     for i, dev in enumerate(devices):
-        if exclude_idx is not None and i == exclude_idx:
+        if exclude_index is not None and i == exclude_index:
             continue
         if dev['ip'] == ip:
             raise ValueError(f'Device IP {ip} already exists.')
     return ip
 
 
-def _validate_device_name(name_text: str, devices: list, exclude_idx: int = None) -> str:
+def _validate_device_name(name_text: str, devices: list, exclude_index: int = None) -> str:
     if not name_text.strip():
         raise ValueError('Device name cannot be empty.')
     name = ' '.join(name_text.strip().split())
     for i, dev in enumerate(devices):
-        if exclude_idx is not None and i == exclude_idx:
+        if exclude_index is not None and i == exclude_index:
             continue
         existing = ' '.join(str(dev.get('name', '')).strip().split())
         if existing.lower() == name.lower():
