@@ -4,36 +4,19 @@ ZKTeco device control via pyzk.
 Reboot, clock sync, user sync, add user, device status, unknown UIDs.
 """
 
-import configparser
 import logging
-import os
 from datetime import datetime
 from typing import Optional
 from zk import ZK
 from zk.exception import ZKErrorResponse, ZKNetworkError
+import settings
 
 logger = logging.getLogger(__name__)
-
-_cfg = configparser.ConfigParser()
-_cfg.read(os.path.join(os.path.dirname(__file__), 'config.ini'))
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 def _get_devices() -> list:
-    ips   = [i.strip() for i in _cfg.get('devices', 'ips', fallback='').split(',') if i.strip()]
-    names_raw = _cfg.get('devices', 'names', fallback='')
-    names = [n.strip() for n in names_raw.split(',') if n.strip()]
-    port    = _cfg.getint('devices', 'port', fallback=4370)
-    timeout = _cfg.getint('devices', 'timeout', fallback=10)
-    result = []
-    for i, ip in enumerate(ips):
-        result.append({
-            'ip': ip,
-            'name': names[i] if i < len(names) else f'Device {i+1}',
-            'port': port,
-            'timeout': timeout,
-        })
-    return result
+    return settings.get_devices()
 
 def get_device_by_ip(ip: str) -> Optional[dict]:
     return next((d for d in _get_devices() if d['ip'] == ip), None)
@@ -53,6 +36,27 @@ def _connect(device: dict):
     conn = zk.connect()
     return conn, zk
 
+
+def check_device_connectivity(ip: str, port: int, timeout: Optional[int] = None) -> tuple:
+    """Return (ok, error_message) after attempting a real device connection."""
+    conn = None
+    try:
+        conn, _ = _connect({
+            'ip': ip,
+            'port': int(port),
+            'timeout': int(timeout or settings.get_device_timeout()),
+        })
+        return True, ''
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        if conn:
+            try:
+                conn.enable_device()
+                conn.disconnect()
+            except Exception:
+                pass
+
 # ─── Device status ────────────────────────────────────────────────────────────
 
 def get_device_status() -> list:
@@ -60,7 +64,7 @@ def get_device_status() -> list:
     devices = _get_devices()
     result = []
     for d in devices:
-        status = {'name': d['name'], 'ip': d['ip'], 'online': False,
+        status = {'name': d['name'], 'ip': d['ip'], 'port': d['port'], 'online': False,
                   'users': None, 'logs': None, 'firmware': None, 'time': None}
         conn = None
         try:
