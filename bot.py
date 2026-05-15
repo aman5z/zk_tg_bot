@@ -27,6 +27,7 @@ import zk_devices
 import notifier
 import settings
 import report_builder
+import email_sender
 from report_builder import TEMPLATES as REPORT_TEMPLATES, DEPT_ORDER
 from settings import _DAY_NAMES
 
@@ -343,7 +344,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "<b>Settings</b>\n"
         "/livepunches — toggle live punch notifications on/off\n"
         "/editreport — configure on-demand /report settings\n"
-        "/editdaily — configure scheduled daily report settings\n\n"
+        "/editdaily — configure scheduled daily report settings\n"
+        "/editemail — configure Gmail SMTP email delivery (optional)\n\n"
         "<b>Database</b>\n"
         "/stats — MDB stats\n"
         "/mdbinfo — MDB path + file info\n"
@@ -1081,6 +1083,103 @@ def _days_menu_kb(current: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+
+# ── Email (SMTP) settings helpers ─────────────────────────────────────────────
+
+_EMAIL_FORMATS = ['html', 'plain', 'both']
+
+
+def _smtp_status_icon() -> str:
+    return '🟢' if settings.get_smtp_enabled() else '🔴'
+
+
+def _smtp_daily_icon() -> str:
+    return '🟢' if settings.get_smtp_daily_enabled() else '🔴'
+
+
+def _fmt_email_panel() -> tuple:
+    """Return (text, InlineKeyboardMarkup) for the /editemail panel."""
+    sender      = settings.get_smtp_sender_email() or '—'
+    name        = settings.get_smtp_sender_name() or '—'
+    password_ok = '✅ Set' if settings.get_smtp_app_password() else '❌ Not set'
+    recipients  = settings.get_smtp_recipients()
+    recip_str   = f"{len(recipients)} address(es)" if recipients else '—'
+    subject     = settings.get_smtp_subject()
+    fmt         = settings.get_smtp_format().upper()
+
+    text = (
+        f"📧 <b>Email (SMTP) Settings</b>\n\n"
+        f"🔌 SMTP: <b>{'ENABLED' if settings.get_smtp_enabled() else 'DISABLED'}</b>\n"
+        f"📅 Daily email: <b>{'ENABLED' if settings.get_smtp_daily_enabled() else 'DISABLED'}</b>\n\n"
+        f"📤 Sender: <code>{sender}</code>\n"
+        f"👤 Name: <b>{name}</b>\n"
+        f"🔑 Password: <b>{password_ok}</b>\n"
+        f"👥 Recipients: <b>{recip_str}</b>\n"
+        f"📝 Subject: <code>{subject}</code>\n"
+        f"📄 Format: <b>{fmt}</b>"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"{_smtp_status_icon()} SMTP {'On' if settings.get_smtp_enabled() else 'Off'}",
+                callback_data='ee:toggle_smtp'),
+            InlineKeyboardButton(
+                f"{_smtp_daily_icon()} Daily {'On' if settings.get_smtp_daily_enabled() else 'Off'}",
+                callback_data='ee:toggle_daily'),
+        ],
+        [
+            InlineKeyboardButton('📤 Sender Email', callback_data='ee:sender_email'),
+            InlineKeyboardButton('👤 Sender Name',  callback_data='ee:sender_name'),
+        ],
+        [
+            InlineKeyboardButton('🔑 Password',    callback_data='ee:password'),
+            InlineKeyboardButton('👥 Recipients',  callback_data='ee:recipients_menu'),
+        ],
+        [
+            InlineKeyboardButton('📝 Subject',     callback_data='ee:subject'),
+            InlineKeyboardButton('📄 Format',      callback_data='ee:fmt_menu'),
+        ],
+        [
+            InlineKeyboardButton('📨 Send Now',    callback_data='ee:send_now'),
+        ],
+        [InlineKeyboardButton('✅ Done',           callback_data='ee:done')],
+    ])
+    return text, kb
+
+
+def _email_fmt_menu_kb(current: str) -> InlineKeyboardMarkup:
+    rows = []
+    for fmt in _EMAIL_FORMATS:
+        checked = fmt == current.lower()
+        rows.append([InlineKeyboardButton(
+            f"{'✅' if checked else '⬜'} {fmt.upper()}",
+            callback_data=f'ee:fmt:{fmt}',
+        )])
+    rows.append([InlineKeyboardButton('← Back', callback_data='ee:back')])
+    return InlineKeyboardMarkup(rows)
+
+
+def _email_recipients_menu_kb() -> InlineKeyboardMarkup:
+    recipients = settings.get_smtp_recipients()
+    rows = []
+    for i, addr in enumerate(recipients):
+        rows.append([InlineKeyboardButton(
+            f"❌ {addr}",
+            callback_data=f'ee:remove_recip:{i}',
+        )])
+    rows.append([InlineKeyboardButton('➕ Add Recipient', callback_data='ee:add_recipient')])
+    rows.append([InlineKeyboardButton('← Back', callback_data='ee:back')])
+    return InlineKeyboardMarkup(rows)
+
+
+def _email_recipients_text() -> str:
+    recipients = settings.get_smtp_recipients()
+    if not recipients:
+        return '👥 <b>Recipients</b>\n\nNo recipients configured yet.'
+    addr_list = '\n'.join(f"  {i + 1}. {r}" for i, r in enumerate(recipients))
+    return f'👥 <b>Recipients ({len(recipients)})</b>\n\n{addr_list}\n\nTap ❌ to remove, or add a new address:'
+
+
 # ── /editreport command ───────────────────────────────────────────────────────
 
 async def cmd_editreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1100,6 +1199,17 @@ async def cmd_editdaily(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     _edit_state[chat_id] = {'ctx': 'daily', 'awaiting': None}
     text, kb = _fmt_daily_panel()
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+# ── /editemail command ────────────────────────────────────────────────────────
+
+async def cmd_editemail(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    chat_id = str(update.effective_chat.id)
+    _edit_state[chat_id] = {'ctx': 'email', 'awaiting': None}
+    text, kb = _fmt_email_panel()
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
@@ -1343,6 +1453,169 @@ async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML)
             return
 
+    # ── Email settings panel ── (prefix 'ee:')
+    if data.startswith('ee:'):
+        action = data[3:]
+
+        if action == 'done':
+            _edit_state.pop(chat_id, None)
+            await query.edit_message_text('✅ Email settings saved.')
+            return
+
+        if action == 'back':
+            text, kb = _fmt_email_panel()
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                          reply_markup=kb)
+            return
+
+        if action == 'toggle_smtp':
+            settings.set_smtp_enabled(not settings.get_smtp_enabled())
+            text, kb = _fmt_email_panel()
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                          reply_markup=kb)
+            return
+
+        if action == 'toggle_daily':
+            settings.set_smtp_daily_enabled(not settings.get_smtp_daily_enabled())
+            text, kb = _fmt_email_panel()
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                          reply_markup=kb)
+            return
+
+        if action == 'sender_email':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']      = 'email'
+            st['awaiting'] = 'email_sender_email'
+            current = settings.get_smtp_sender_email() or '—'
+            await query.edit_message_text(
+                '📤 <b>Set Sender Email</b>\n\n'
+                f'Current: <code>{current}</code>\n\n'
+                'Reply with your Gmail address.\n'
+                'Example: <code>school.attendance@gmail.com</code>',
+                parse_mode=ParseMode.HTML)
+            return
+
+        if action == 'sender_name':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']      = 'email'
+            st['awaiting'] = 'email_sender_name'
+            current = settings.get_smtp_sender_name()
+            await query.edit_message_text(
+                '👤 <b>Set Sender Name</b>\n\n'
+                f'Current: <b>{current}</b>\n\n'
+                'Reply with the display name for the From: header.\n'
+                'Example: <code>Attendance Bot</code>',
+                parse_mode=ParseMode.HTML)
+            return
+
+        if action == 'password':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']      = 'email'
+            st['awaiting'] = 'email_app_password'
+            set_status = '✅ Already set' if settings.get_smtp_app_password() else '❌ Not set'
+            await query.edit_message_text(
+                '🔑 <b>Set Gmail App Password</b>\n\n'
+                f'Status: <b>{set_status}</b>\n\n'
+                'Reply with your Gmail App Password (16 chars, no spaces).\n'
+                'Get one at: Google Account → Security → App Passwords.\n\n'
+                '⚠️ This is stored in config.ini — do not share that file.',
+                parse_mode=ParseMode.HTML)
+            return
+
+        if action == 'recipients_menu':
+            kb = _email_recipients_menu_kb()
+            await query.edit_message_text(
+                _email_recipients_text(),
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action == 'add_recipient':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']      = 'email'
+            st['awaiting'] = 'email_add_recipient'
+            await query.edit_message_text(
+                '➕ <b>Add Recipient</b>\n\n'
+                'Reply with the email address to add.\n'
+                'Example: <code>principal@school.ae</code>',
+                parse_mode=ParseMode.HTML)
+            return
+
+        if action.startswith('remove_recip:'):
+            try:
+                idx = int(action.split(':')[1])
+            except (ValueError, IndexError):
+                return
+            recipients = settings.get_smtp_recipients()
+            if 0 <= idx < len(recipients):
+                removed = recipients.pop(idx)
+                settings.set_smtp_recipients(recipients)
+                kb = _email_recipients_menu_kb()
+                await query.edit_message_text(
+                    _email_recipients_text() + f'\n\n✅ Removed: <code>{removed}</code>',
+                    parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action == 'subject':
+            st = _edit_state.setdefault(chat_id, {})
+            st['ctx']      = 'email'
+            st['awaiting'] = 'email_subject'
+            current = settings.get_smtp_subject()
+            await query.edit_message_text(
+                '📝 <b>Set Email Subject</b>\n\n'
+                f'Current: <code>{current}</code>\n\n'
+                'Reply with the subject line.\n'
+                'Use <code>{date}</code> as a placeholder for the report date.\n'
+                'Example: <code>Daily Absent Report - {date}</code>',
+                parse_mode=ParseMode.HTML)
+            return
+
+        if action == 'fmt_menu':
+            kb = _email_fmt_menu_kb(settings.get_smtp_format())
+            await query.edit_message_text(
+                '📄 <b>Select Email Format</b>\n\n'
+                '<b>HTML</b> — rich email with a styled table\n'
+                '<b>PLAIN</b> — plain-text only\n'
+                '<b>BOTH</b> — multipart (HTML + plain fallback)',
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action.startswith('fmt:'):
+            val = action[4:].strip().lower()
+            if val in _EMAIL_FORMATS:
+                settings.set_smtp_format(val)
+            kb = _email_fmt_menu_kb(settings.get_smtp_format())
+            await query.edit_message_reply_markup(reply_markup=kb)
+            return
+
+        if action == 'send_now':
+            await query.edit_message_text('⏳ Sending email report now…')
+            try:
+                summary = mdb_reader.get_today_summary()
+                absent  = summary['absent']
+                ok, err = email_sender.send_report_email(
+                    sender_email=settings.get_smtp_sender_email(),
+                    sender_name=settings.get_smtp_sender_name(),
+                    app_password=settings.get_smtp_app_password(),
+                    recipients=settings.get_smtp_recipients(),
+                    subject=settings.get_smtp_subject(),
+                    report_date=date.today(),
+                    absent=absent,
+                    summary=summary,
+                    fmt=settings.get_smtp_format(),
+                )
+                if ok:
+                    n = len(settings.get_smtp_recipients())
+                    await query.edit_message_text(
+                        f'✅ Email sent to {n} recipient(s).\n\n'
+                        f'Use /editemail to return to settings.')
+                else:
+                    await query.edit_message_text(
+                        f'❌ Email failed: {err}\n\n'
+                        'Check your SMTP settings with /editemail.')
+            except Exception as exc:
+                await query.edit_message_text(f'❌ Error: {exc}')
+            return
+
 
 # ── Text input handler for awaiting states ────────────────────────────────────
 
@@ -1433,6 +1706,78 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f'✅ Daily report save directory set to:\n<code>{text}</code>\n\n'
                 f'Use /editdaily to review all settings.',
                 parse_mode=ParseMode.HTML)
+        return
+
+    # ── Email (SMTP) awaiting states ──────────────────────────────────────────
+
+    if awaiting == 'email_sender_email':
+        if '@' not in text or '.' not in text.split('@')[-1]:
+            await update.message.reply_text(
+                '❌ That does not look like a valid email address. Please try again.',
+                parse_mode=ParseMode.HTML)
+            return
+        settings.set_smtp_sender_email(text)
+        st['awaiting'] = None
+        await update.message.reply_text(
+            f'✅ Sender email set to <code>{text}</code>\n'
+            'Use /editemail to review all settings.',
+            parse_mode=ParseMode.HTML)
+        return
+
+    if awaiting == 'email_sender_name':
+        settings.set_smtp_sender_name(text)
+        st['awaiting'] = None
+        await update.message.reply_text(
+            f'✅ Sender name set to <b>{text}</b>\n'
+            'Use /editemail to review all settings.',
+            parse_mode=ParseMode.HTML)
+        return
+
+    if awaiting == 'email_app_password':
+        if len(text) < 8:
+            await update.message.reply_text(
+                '❌ App Password seems too short. Gmail App Passwords are 16 characters. '
+                'Please try again.',
+                parse_mode=ParseMode.HTML)
+            return
+        settings.set_smtp_app_password(text)
+        st['awaiting'] = None
+        await update.message.reply_text(
+            '✅ App Password saved.\n'
+            'Use /editemail to review all settings.',
+            parse_mode=ParseMode.HTML)
+        return
+
+    if awaiting == 'email_add_recipient':
+        if '@' not in text or '.' not in text.split('@')[-1]:
+            await update.message.reply_text(
+                '❌ That does not look like a valid email address. Please try again.',
+                parse_mode=ParseMode.HTML)
+            return
+        recipients = settings.get_smtp_recipients()
+        if text in recipients:
+            st['awaiting'] = None
+            await update.message.reply_text(
+                f'ℹ️ <code>{text}</code> is already in the recipients list.',
+                parse_mode=ParseMode.HTML)
+            return
+        recipients.append(text)
+        settings.set_smtp_recipients(recipients)
+        st['awaiting'] = None
+        await update.message.reply_text(
+            f'✅ Added <code>{text}</code> to recipients.\n'
+            f'Total recipients: {len(recipients)}\n'
+            'Use /editemail to review all settings.',
+            parse_mode=ParseMode.HTML)
+        return
+
+    if awaiting == 'email_subject':
+        settings.set_smtp_subject(text)
+        st['awaiting'] = None
+        await update.message.reply_text(
+            f'✅ Subject set to:\n<code>{text}</code>\n\n'
+            'Use /editemail to review all settings.',
+            parse_mode=ParseMode.HTML)
         return
 
 # ── Employee commands ─────────────────────────────────────────────────────────
@@ -2323,6 +2668,7 @@ def main():
         ('livepunches', cmd_livepunches),
         ('editreport',  cmd_editreport),
         ('editdaily',   cmd_editdaily),
+        ('editemail',   cmd_editemail),
         # DB
         ('stats',       cmd_stats),
         ('mdbinfo',     cmd_mdbinfo),
@@ -2341,7 +2687,7 @@ def main():
 
     # Callback query handlers — route by prefix
     app.add_handler(CallbackQueryHandler(callback_edit,
-                                         pattern=r'^(er:|ed:)'))
+                                         pattern=r'^(er:|ed:|ee:)'))
     app.add_handler(CallbackQueryHandler(callback_calendar))
 
     # Text input handler (for edit panel awaiting states)

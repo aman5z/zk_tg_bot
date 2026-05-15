@@ -204,3 +204,90 @@ def daily_days_label() -> str:
 
 def daily_time_label() -> str:
     return f"{get_daily_hour():02d}:{get_daily_minute():02d}"
+
+
+# ─── SMTP / Email settings ────────────────────────────────────────────────────
+
+def get_smtp_enabled() -> bool:
+    """Master switch — False by default so pure Telegram users are unaffected."""
+    return _cfg.getboolean('smtp', 'enabled', fallback=False)
+
+
+def set_smtp_enabled(val: bool):
+    _ensure('smtp')
+    _cfg['smtp']['enabled'] = '1' if val else '0'
+    _save()
+
+
+def get_smtp_daily_enabled() -> bool:
+    """Send email for the scheduled daily report when True."""
+    return _cfg.getboolean('smtp', 'daily_email_enabled', fallback=False)
+
+
+def set_smtp_daily_enabled(val: bool):
+    _ensure('smtp')
+    _cfg['smtp']['daily_email_enabled'] = '1' if val else '0'
+    _save()
+
+
+def get_smtp_sender_email() -> str:
+    return _cfg.get('smtp', 'sender_email', fallback='').strip()
+
+
+def set_smtp_sender_email(val: str):
+    _ensure('smtp')
+    _cfg['smtp']['sender_email'] = val.strip()
+    _save()
+
+
+def get_smtp_sender_name() -> str:
+    return _cfg.get('smtp', 'sender_name', fallback='ZKTeco Attendance Bot').strip()
+
+
+def set_smtp_sender_name(val: str):
+    _ensure('smtp')
+    _cfg['smtp']['sender_name'] = val.strip()
+    _save()
+
+
+def get_smtp_app_password() -> str:
+    return _cfg.get('smtp', 'app_password', fallback='').strip()
+
+
+def set_smtp_app_password(val: str):
+    _ensure('smtp')
+    _cfg['smtp']['app_password'] = val.strip()
+    _save()
+
+
+def get_smtp_recipients() -> list:
+    raw = _cfg.get('smtp', 'recipients', fallback='').strip()
+    return [r.strip() for r in raw.split(',') if r.strip()]
+
+
+def set_smtp_recipients(recipients: list):
+    _ensure('smtp')
+    _cfg['smtp']['recipients'] = ','.join(recipients)
+    _save()
+
+
+def get_smtp_subject() -> str:
+    return _cfg.get('smtp', 'subject',
+                    fallback='Daily Absent Report - {date}').strip()
+
+
+def set_smtp_subject(val: str):
+    _ensure('smtp')
+    _cfg['smtp']['subject'] = val.strip()
+    _save()
+
+
+def get_smtp_format() -> str:
+    """'html' | 'plain' | 'both'"""
+    return _cfg.get('smtp', 'format', fallback='html').strip().lower()
+
+
+def set_smtp_format(val: str):
+    _ensure('smtp')
+    _cfg['smtp']['format'] = val.strip().lower()
+    _save()

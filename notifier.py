@@ -21,6 +21,7 @@ import mdb_reader
 import zk_devices
 import settings
 import report_builder
+import email_sender
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,25 @@ async def send_daily_report(
                     logger.info(f"Report saved to {dest}")
             except OSError as e:
                 logger.error(f"Failed to save report to {save_dir}: {e}")
+
+        # ── Email delivery (optional, controlled by [smtp] config) ───────────
+        if settings.get_smtp_enabled() and settings.get_smtp_daily_enabled():
+            ok, err = email_sender.send_report_email(
+                sender_email=settings.get_smtp_sender_email(),
+                sender_name=settings.get_smtp_sender_name(),
+                app_password=settings.get_smtp_app_password(),
+                recipients=settings.get_smtp_recipients(),
+                subject=settings.get_smtp_subject(),
+                report_date=today,
+                absent=absent,
+                summary=summary,
+                fmt=settings.get_smtp_format(),
+            )
+            if ok:
+                logger.info("Daily report email sent successfully.")
+            else:
+                logger.error(f"Daily report email failed: {err}")
+                await _send(bot, f"⚠️ Daily email failed: {err}")
 
     except Exception as e:
         logger.error(f"Daily report error: {e}")

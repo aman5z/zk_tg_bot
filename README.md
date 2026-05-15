@@ -15,6 +15,7 @@ No web dashboard, no Flask, no SQLite — pure Telegram interface.
   - [mdb\_reader.py](#mdb_readerpy)
   - [zk\_devices.py](#zk_devicespy)
   - [notifier.py](#notifierpy)
+  - [email\_sender.py](#email_senderpy)
   - [config.ini](#configini)
 - [Setup](#setup)
 - [Configuration Reference](#configuration-reference)
@@ -48,12 +49,15 @@ Telegram user
      └────── zk_devices.py   ──── ZKTeco devices (TCP, via pyzk)
      │
      └────── notifier.py     ──── Async scheduler (daily report + device alerts)
+     │
+     └────── email_sender.py ──── Optional Gmail SMTP delivery (disabled by default)
 ```
 
 - `bot.py` is the entry point. It creates the `python-telegram-bot` Application, registers all command handlers, and launches the background scheduler.
 - `mdb_reader.py` wraps `mdb-export` (from `mdbtools`) to read employee, attendance, and department data.
 - `zk_devices.py` opens TCP connections to each ZKTeco device using `pyzk`.
 - `notifier.py` runs as an async loop alongside the bot, firing scheduled messages.
+- `email_sender.py` is an **optional** Gmail SMTP module. It is disabled by default and does not affect any existing Telegram functionality.
 
 ---
 
@@ -124,6 +128,7 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_autonmap` | `/autonmap` | Suggests UID→badge matches only (not persisted). |
 | `cmd_shifts` | `/shifts` | Read-only shift configuration view. |
 | `cmd_workdays` | `/workdays` | Read-only workday/report-days configuration view. |
+| `cmd_editemail` | `/editemail` | Opens the Gmail SMTP settings panel (inline keyboard). Configure sender, App Password, recipients, subject, format, and schedule. Disabled by default — pure Telegram users are unaffected. |
 | `unknown_cmd` | *(any other command)* | Replies with `❓ Unknown command. Send /help for list.` |
 
 #### Main entry
@@ -261,9 +266,28 @@ Async scheduler that runs alongside the bot, sending proactive Telegram notifica
 
 | Function | Description |
 |----------|-------------|
-| `send_daily_report(bot)` | Builds today's absent list as an in-memory XLSX (using `pandas` + `openpyxl`) and sends it with a summary message. If no absences, sends a "✅ All present" message. Also called on demand by `/report`. |
+| `send_daily_report(bot)` | Builds today's absent list as an in-memory XLSX (using `pandas` + `openpyxl`) and sends it with a summary message. If no absences, sends a "✅ All present" message. Also called on demand by `/report`. If SMTP is enabled and `daily_email_enabled = 1`, also calls `email_sender.send_report_email()`. |
 | `check_device_status_changes(bot)` | Compares each device's current online/offline state to the last known state. Sends a `🟢 ONLINE` or `🔴 OFFLINE` alert only when the state changes. Silent on first run (just records initial state). |
 | `run_scheduler(bot)` | Async loop (runs every 60 s): checks device status every 5 minutes and fires `send_daily_report` once per day at the configured time. |
+
+---
+
+### email\_sender.py
+
+Optional Gmail SMTP module. All functions use only the Python standard library (`smtplib`, `email`). **Disabled by default** — if `[smtp] enabled = 0` in `config.ini`, nothing in this module is ever called.
+
+#### Body builders
+
+| Function | Description |
+|----------|-------------|
+| `build_plain_body(report_date, absent, summary)` | Builds a plain-text email body for the absent report (dept-grouped list). |
+| `build_html_body(report_date, absent, summary)` | Builds a styled HTML email body with a summary header and per-department absent table. |
+
+#### Send function
+
+| Function | Description |
+|----------|-------------|
+| `send_report_email(sender_email, sender_name, app_password, recipients, subject, report_date, absent, summary, fmt)` | Authenticates to Gmail SMTP (TLS, port 587) and delivers the absent report email. `fmt` is `'html'`, `'plain'`, or `'both'` (multipart/alternative). Returns `(True, '')` on success or `(False, error_message)` on failure. |
 
 ---
 
@@ -304,7 +328,21 @@ daily_report_minute  = 10
 
 [reports]
 export_dir = /tmp/zk_reports          # temp dir for XLSX exports
+
+[smtp]
+enabled              = 0              # 1 = enable SMTP email delivery
+daily_email_enabled  = 0              # 1 = also email the scheduled daily report
+sender_email         =                # Gmail address to send from
+sender_name          = ZKTeco Attendance Bot  # From: display name
+app_password         =                # Gmail App Password (not account password)
+recipients           =                # comma-separated recipient addresses
+subject              = Daily Absent Report - {date}  # {date} is replaced at send time
+format               = html           # html | plain | both (multipart/alternative)
 ```
+
+> **SMTP is disabled by default (`enabled = 0`).** All existing Telegram functionality is unchanged. Enable it by running `/editemail` in the bot.
+>
+> **Gmail App Password:** create one at *Google Account → Security → 2-Step Verification → App Passwords*. Use the 16-character password here — never your main Google account password.
 
 ---
 
@@ -450,6 +488,31 @@ sudo journalctl -u zkbot -f    # live logs
 | `/shifts` | Read-only view of shift settings used by late/early checks |
 | `/workdays` | Read-only view of configured report days and fixed weekend rules |
 
+### Settings
+
+| Command | Description |
+|---------|-------------|
+| `/livepunches` | Toggle per-punch live notifications on/off |
+| `/editreport` | Interactive panel — configure on-demand `/report` settings (departments, format, template, save dir) |
+| `/editdaily` | Interactive panel — configure scheduled daily report settings (time, days, departments, format, save dir) |
+| `/editemail` | Interactive panel — configure Gmail SMTP email delivery (see below) |
+
+#### `/editemail` — Gmail SMTP settings
+
+All email configuration is managed entirely through this Telegram command — no manual `config.ini` editing is required.
+
+| Setting | Button | Description |
+|---------|--------|-------------|
+| SMTP on/off | 🔌 SMTP On/Off | Master switch. Off by default — disabling this leaves all Telegram behaviour unchanged. |
+| Daily email on/off | 📅 Daily On/Off | When on, the scheduled daily report is also sent by email. |
+| Sender email | 📤 Sender Email | Gmail address the bot sends from. |
+| Sender name | 👤 Sender Name | Display name that appears in the `From:` header. |
+| App Password | 🔑 Password | Gmail App Password (16-char, obtained from Google Account → Security). Never stored outside `config.ini`. |
+| Recipients | 👥 Recipients | Add or remove email addresses. Tap ❌ next to an address to remove it. |
+| Subject | 📝 Subject | Email subject line; `{date}` is replaced with the report date at send time. |
+| Format | 📄 Format | `HTML` (styled table), `PLAIN` (plain text), or `BOTH` (multipart/alternative with both). |
+| Send Now | 📨 Send Now | Immediately send the today's absent report email to all configured recipients. Useful for testing. |
+
 ---
 
 ## Automated Notifications
@@ -459,9 +522,10 @@ The `notifier.run_scheduler()` loop runs in the background as an asyncio task:
 | Trigger | Action |
 |---------|--------|
 | Every 5 minutes | Check all device online/offline states; alert in Telegram if any device changes state |
-| Daily at 08:10 (configurable) | Send absent employee list as a text summary + XLSX attachment |
+| Daily at 08:15 (configurable) | Send absent employee list as a text summary + XLSX attachment to Telegram |
+| Daily at 08:15 (configurable, optional) | If `[smtp] enabled = 1` and `daily_email_enabled = 1`, also send the absent report by email |
 
-Both timings are configurable in `config.ini` under `[notifications]`.
+Report timing is configurable via `/editdaily`. Email delivery is configurable via `/editemail`.
 
 ---
 
@@ -476,3 +540,6 @@ Both timings are configurable in `config.ini` under `[notifications]`.
 - **Who-is-in logic** uses odd punch count as a proxy for "currently inside." This may be inaccurate if a device recorded an extra erroneous punch.
 - **Telegram message limit.** The bot splits responses longer than 4000 characters across multiple messages automatically.
 - **Authentication.** Only the `chat_id` specified in config (plus any `allowed_users`) can issue commands. All other senders receive `⛔ Unauthorized.`
+- **Email is opt-in.** SMTP delivery defaults to disabled (`[smtp] enabled = 0`). Pure Telegram users need not configure it and will see no change in behaviour. Use `/editemail` to enable it.
+- **Gmail App Password.** Standard Gmail passwords do not work. Enable 2-Step Verification on your Google account and generate an App Password at *Google Account → Security → App Passwords*. The password is stored in `config.ini` — treat that file as sensitive.
+- **No new Python dependencies** are required for email. `smtplib` and `email` are part of the Python standard library.
