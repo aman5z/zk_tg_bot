@@ -13,6 +13,7 @@ import html
 import logging
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -68,6 +69,12 @@ SHELL_SESSION_TIMEOUT_MINUTES = _cfg.getint(_SEC_SECTION, 'shell_session_timeout
 SHELL_MAX_FAILED_ATTEMPTS = max(1, _cfg.getint(_SEC_SECTION, 'shell_max_failed_attempts', fallback=3))
 SHELL_LOCKOUT_MINUTES = max(1, _cfg.getint(_SEC_SECTION, 'shell_lockout_minutes', fallback=10))
 SHELL_CMD_TIMEOUT_SECONDS = max(1, _cfg.getint(_SEC_SECTION, 'shell_cmd_timeout_seconds', fallback=8))
+SHELL_BASE_DIR = os.path.realpath(_cfg.get(_SEC_SECTION, 'shell_base_dir', fallback='/tmp').strip() or '/tmp')
+SHELL_ALLOWED_PATHS = [
+    os.path.realpath(p.strip())
+    for p in _cfg.get(_SEC_SECTION, 'shell_allowed_paths', fallback='/tmp,/var/log,/etc').split(',')
+    if p.strip()
+]
 SQL_MAX_ROWS = max(1, _cfg.getint(_SEC_SECTION, 'sql_max_rows', fallback=50))
 SQL_MAX_TEXT_CHARS = max(500, _cfg.getint(_SEC_SECTION, 'sql_max_text_chars', fallback=3200))
 AUDIT_LOG_PATH = _cfg.get(_SEC_SECTION, 'audit_log_path', fallback='audit.log').strip() or 'audit.log'
@@ -1249,11 +1256,12 @@ SHELL_BASE_WHITELIST = {
 SHELL_ROOT_WHITELIST = SHELL_BASE_WHITELIST | {'journalctl'}
 SHELL_READ_CMDS = {'ls', 'cat', 'head', 'tail', 'wc'}
 SHELL_BLOCKED_PATH_PARTS = {'/root', '/proc', '/sys', '/dev', '/run'}
-SHELL_BLOCKED_FILE_MARKERS = {'shadow', '.ssh', 'id_rsa', 'id_ed25519'}
+SHELL_BLOCKED_FILE_MARKERS = {'shadow', '.ssh'}
 SQL_SELECT_RE = re.compile(
-    r'^\s*select\s+.+\s+from\s+([a-zA-Z_][a-zA-Z0-9_]*)'
-    r'(?:\s+where\s+.+?)?(?:\s+limit\s+\d+)?\s*$',
-    re.IGNORECASE | re.DOTALL
+    r'^\s*select\s+(?P<cols>[a-zA-Z0-9_,\s*]+)\s+from\s+(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)'
+    r'(?:\s+where\s+(?P<where>[a-zA-Z0-9_\'"\s=.\-]+))?'
+    r'(?:\s+limit\s+(?P<limit>\d+))?\s*$',
+    re.IGNORECASE
 )
 SQL_DISALLOWED_RE = re.compile(
     r'(^|\W)(insert|update|delete|drop|alter|create|truncate|replace|'
@@ -1306,12 +1314,20 @@ def _is_safe_read_path(raw_path: str) -> bool:
         return False
     if '..' in raw_path:
         return False
-    full = os.path.realpath(raw_path if raw_path.startswith('/') else os.path.join(os.getcwd(), raw_path))
+    full = os.path.realpath(raw_path if raw_path.startswith('/') else os.path.join(SHELL_BASE_DIR, raw_path))
     for part in SHELL_BLOCKED_PATH_PARTS:
-        if full == part or full.startswith(part + os.sep):
+        part_full = os.path.realpath(part)
+        if full == part_full or full.startswith(part_full + os.sep):
             return False
-    full_path_lower = full.lower()
-    if any(mark in full_path_lower for mark in SHELL_BLOCKED_FILE_MARKERS):
+    if not any(full == ap or full.startswith(ap + os.sep) for ap in SHELL_ALLOWED_PATHS):
+        return False
+    parts_lower = [p.lower() for p in full.split(os.sep) if p]
+    basename = os.path.basename(full).lower()
+    if any(mark in parts_lower for mark in SHELL_BLOCKED_FILE_MARKERS):
+        return False
+    if basename in {'passwd', 'gshadow'}:
+        return False
+    if basename.startswith('id_rsa') or basename.startswith('id_ed25519'):
         return False
     return True
 
@@ -1326,6 +1342,8 @@ def _run_safe_shell_command(command_text: str, elevated: bool = False) -> tuple:
     if not parts:
         return False, 'Empty command.'
     cmd = parts[0].lower()
+    if any('\\' in arg for arg in parts[1:]):
+        return False, 'Backslash escapes are not allowed in arguments.'
     allowed_set = SHELL_ROOT_WHITELIST if elevated else SHELL_BASE_WHITELIST
     if cmd not in allowed_set:
         return False, f'Command "{cmd}" is not allowed.'
@@ -1343,7 +1361,7 @@ def _run_safe_shell_command(command_text: str, elevated: bool = False) -> tuple:
             text=True,
             timeout=SHELL_CMD_TIMEOUT_SECONDS,
             shell=False,
-            cwd=os.getcwd(),
+            cwd=SHELL_BASE_DIR,
         )
     except subprocess.TimeoutExpired:
         return False, f'Command timed out after {SHELL_CMD_TIMEOUT_SECONDS}s.'
@@ -1376,6 +1394,9 @@ def _validate_select_query(query: str) -> tuple:
     m = SQL_SELECT_RE.match(q)
     if not m:
         return False, 'Only simple SELECT ... FROM ... [WHERE ...] [LIMIT N] syntax is allowed.'
+    cols = m.group('cols').strip()
+    if '(' in cols or ')' in cols:
+        return False, 'Functions/subqueries are not allowed in SELECT columns.'
     return True, ''
 
 
@@ -1385,7 +1406,8 @@ def _execute_readonly_sql(query: str) -> tuple:
         return False, err, None
     q = query.strip()
     m = SQL_SELECT_RE.match(q)
-    table = m.group(1)
+    cols_expr = m.group('cols').strip()
+    table = m.group('table')
     try:
         tables = {t.lower(): t for t in mdb_reader.list_tables()}
     except Exception as exc:
@@ -1401,13 +1423,7 @@ def _execute_readonly_sql(query: str) -> tuple:
         return True, 'No rows found.', None
     df = pd.DataFrame(rows)
 
-    lower_q = q.lower()
-    where_clause = None
-    if ' where ' in lower_q:
-        where_start = lower_q.index(' where ') + len(' where ')
-        where_text = q[where_start:]
-        limit_pos = where_text.lower().rfind(' limit ')
-        where_clause = where_text[:limit_pos].strip() if limit_pos != -1 else where_text.strip()
+    where_clause = (m.group('where') or '').strip()
     if where_clause:
         conds = [c.strip() for c in re.split(r'\s+and\s+', where_clause, flags=re.IGNORECASE) if c.strip()]
         for c in conds:
@@ -1420,18 +1436,16 @@ def _execute_readonly_sql(query: str) -> tuple:
             val = cm.group(2) if cm.group(2) is not None else cm.group(3) if cm.group(3) is not None else cm.group(4)
             df = df[df[col].astype(str) == str(val)]
 
-    select_section = q[q.lower().index('select') + 6:q.lower().index(' from ')].strip()
-    if select_section != '*':
-        cols = [c.strip() for c in select_section.split(',') if c.strip()]
+    if cols_expr != '*':
+        cols = [c.strip() for c in cols_expr.split(',') if c.strip()]
         for c in cols:
             if c not in df.columns:
                 return False, f'Unknown SELECT column: {c}', None
         df = df[cols]
 
     limit = SQL_MAX_ROWS
-    limit_m = re.search(r'\s+limit\s+(\d+)\s*$', q, flags=re.IGNORECASE)
-    if limit_m:
-        limit = min(int(limit_m.group(1)), SQL_MAX_ROWS)
+    if m.group('limit'):
+        limit = min(int(m.group('limit')), SQL_MAX_ROWS)
     df = df.head(limit).fillna('')
     text = df.to_string(index=False) if not df.empty else 'No rows found.'
     if len(text) <= SQL_MAX_TEXT_CHARS:
@@ -2276,7 +2290,7 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         stage = auth.get('stage')
         if stage == 'shell':
-            if text == SHELL_PASSWORD:
+            if secrets.compare_digest(text, SHELL_PASSWORD):
                 _shell_auth_state.pop(chat_id, None)
                 _clear_failed_auth(user_id)
                 _shell_sessions[chat_id] = {
@@ -2306,7 +2320,7 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 _shell_auth_state.pop(chat_id, None)
                 await update.message.reply_text('❌ No active shell session. Start with /shell.')
                 return
-            if text == SHELL_ROOT_PASSWORD:
+            if secrets.compare_digest(text, SHELL_ROOT_PASSWORD):
                 _shell_auth_state.pop(chat_id, None)
                 _clear_failed_auth(user_id)
                 sess['elevated'] = True
