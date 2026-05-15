@@ -345,7 +345,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/livepunches — toggle live punch notifications on/off\n"
         "/editreport — configure on-demand /report settings\n"
         "/editdaily — configure scheduled daily report settings\n"
-        "/editemail — configure Gmail SMTP email delivery (optional)\n\n"
+        "/editemail — configure Gmail SMTP email delivery (optional)\n"
+        "/mail — send attendance report via email (today or pick date)\n\n"
         "<b>Database</b>\n"
         "/stats — MDB stats\n"
         "/mdbinfo — MDB path + file info\n"
@@ -1213,6 +1214,86 @@ async def cmd_editemail(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
+# ── /mail command ─────────────────────────────────────────────────────────────
+
+async def _send_email_for_date(query: CallbackQuery, update: Update, report_date: date):
+    """Send the absent-report email for *report_date* and confirm in chat."""
+    if not settings.get_smtp_enabled():
+        await query.edit_message_text(
+            '❌ Email delivery is disabled.\n'
+            'Enable it first with /editemail.')
+        return
+    missing = []
+    if not settings.get_smtp_sender_email():
+        missing.append('sender email')
+    if not settings.get_smtp_app_password():
+        missing.append('App Password')
+    if not settings.get_smtp_recipients():
+        missing.append('recipients')
+    if missing:
+        await query.edit_message_text(
+            f'❌ Email not fully configured. Missing: {", ".join(missing)}.\n'
+            'Use /editemail to complete setup.')
+        return
+
+    await query.edit_message_text(
+        f'⏳ Sending email report for {report_date.strftime("%d/%m/%Y")}…')
+    try:
+        history = mdb_reader.get_history(report_date, report_date)
+        absent = history[0]['absent'] if history else []
+        summary = {
+            'total':         history[0].get('total', 0) if history else 0,
+            'present_count': history[0].get('present_count', 0) if history else 0,
+            'absent_count':  len(absent),
+            'absent':        absent,
+        }
+        ok, err = email_sender.send_report_email(
+            sender_email=settings.get_smtp_sender_email(),
+            sender_name=settings.get_smtp_sender_name(),
+            app_password=settings.get_smtp_app_password(),
+            recipients=settings.get_smtp_recipients(),
+            subject=settings.get_smtp_subject(),
+            report_date=report_date,
+            absent=absent,
+            summary=summary,
+            fmt=settings.get_smtp_format(),
+        )
+        n = len(settings.get_smtp_recipients())
+        if ok:
+            await query.edit_message_text(
+                f'✅ Email report for {report_date.strftime("%d/%m/%Y")} '
+                f'sent to {n} recipient(s).')
+        else:
+            await query.edit_message_text(
+                f'❌ Email failed: {err}\n\n'
+                'Check your SMTP settings with /editemail.')
+    except Exception as exc:
+        await query.edit_message_text(f'❌ Error: {exc}')
+
+
+async def cmd_mail(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Send an attendance-report email for today or a chosen date."""
+    if not _allowed(update):
+        return await _deny(update)
+    if not settings.get_smtp_enabled():
+        await update.message.reply_text(
+            '❌ Email delivery is disabled.\n'
+            'Enable it first with /editemail.')
+        return
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('📅 Today',     callback_data='mail:today'),
+            InlineKeyboardButton('📆 Pick Date', callback_data='mail:pick'),
+        ],
+        [InlineKeyboardButton('❌ Cancel', callback_data='mail:cancel')],
+    ])
+    await update.message.reply_text(
+        '📧 <b>Email Attendance Report</b>\n\nSelect date:',
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+
 # ── Edit settings callback handler ────────────────────────────────────────────
 
 async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1997,6 +2078,26 @@ async def callback_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _send_absent_report_callback(query, update, report_date)
         return
 
+    # ── Mail date selection ──────────────────────────────────────────────
+    if data.startswith('mail:'):
+        action = data[5:]
+        if action == 'cancel':
+            await query.edit_message_text('❌ Cancelled.')
+            return
+        if action == 'today':
+            await _send_email_for_date(query, update, date.today())
+            return
+        if action == 'pick':
+            today = date.today()
+            kb = _make_cal_keyboard(today.year, today.month, 'M', '_mail_')
+            await query.edit_message_text(
+                '📧 <b>Email Attendance Report</b>\n\n📅 Select date:',
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+            return
+        return
+
     # ── Mode selection (Single / Range-start) ───────────────────────────
     if data.startswith('att_mode:'):
         # format: att_mode:{S|F}:{badge}
@@ -2129,6 +2230,11 @@ async def callback_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
             await _send_range_absent_reports_callback(query, update, d_from_str, d_to_str)
+
+        elif mode == 'M':
+            # Mail — date selected from calendar picker; send email for that date
+            report_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
+            await _send_email_for_date(query, update, report_date)
         return
 
 async def _edit_or_followup(query, update: Update, text: str):
@@ -2669,6 +2775,7 @@ def main():
         ('editreport',  cmd_editreport),
         ('editdaily',   cmd_editdaily),
         ('editemail',   cmd_editemail),
+        ('mail',        cmd_mail),
         # DB
         ('stats',       cmd_stats),
         ('mdbinfo',     cmd_mdbinfo),

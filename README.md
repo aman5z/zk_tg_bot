@@ -129,6 +129,7 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_shifts` | `/shifts` | Read-only shift configuration view. |
 | `cmd_workdays` | `/workdays` | Read-only workday/report-days configuration view. |
 | `cmd_editemail` | `/editemail` | Opens the Gmail SMTP settings panel (inline keyboard). Configure sender, App Password, recipients, subject, format, and schedule. Disabled by default — pure Telegram users are unaffected. |
+| `cmd_mail` | `/mail` | Interactive prompt to send an attendance report by email — choose **Today** or **Pick Date** (calendar picker). Requires SMTP to be enabled via `/editemail`. |
 | `unknown_cmd` | *(any other command)* | Replies with `❓ Unknown command. Send /help for list.` |
 
 #### Main entry
@@ -496,6 +497,7 @@ sudo journalctl -u zkbot -f    # live logs
 | `/editreport` | Interactive panel — configure on-demand `/report` settings (departments, format, template, save dir) |
 | `/editdaily` | Interactive panel — configure scheduled daily report settings (time, days, departments, format, save dir) |
 | `/editemail` | Interactive panel — configure Gmail SMTP email delivery (see below) |
+| `/mail` | Send attendance report by email — **Today** button or interactive date-picker calendar |
 
 #### `/editemail` — Gmail SMTP settings
 
