@@ -672,8 +672,7 @@ async def callback_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         st['awaiting'] = 'admin_notice'
         await query.edit_message_text(
             '📢 Send notice text in your next message.\n'
-            'It will be posted to this authorized chat.\n'
-            'Use /exit to cancel shell/sql prompt sessions.'
+            'It will be posted to this authorized chat.'
         )
         return
     await query.edit_message_text('Unknown admin action.')
