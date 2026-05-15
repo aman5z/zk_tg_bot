@@ -3244,13 +3244,14 @@ def _validate_device_ip(ip_text: str, devices: list, exclude_idx: int = None) ->
 
 
 def _validate_device_name(name_text: str, devices: list, exclude_idx: int = None) -> str:
-    name = ' '.join(name_text.strip().split())
-    if not name:
+    if not name_text.strip():
         raise ValueError('Device name cannot be empty.')
+    name = ' '.join(name_text.strip().split())
     for i, dev in enumerate(devices):
         if exclude_idx is not None and i == exclude_idx:
             continue
-        if dev['name'].strip().lower() == name.lower():
+        existing = ' '.join(str(dev.get('name', '')).strip().split())
+        if existing.lower() == name.lower():
             raise ValueError(f'Device name "{name}" already exists.')
     return name
 
@@ -3333,7 +3334,11 @@ async def callback_device(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == 'edit' and len(parts) >= 3:
-        idx = int(parts[2])
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.message.reply_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
         try:
             dev = _get_device_by_index(idx)
         except Exception as exc:
@@ -3348,7 +3353,11 @@ async def callback_device(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == 'edit_field' and len(parts) >= 4:
-        idx = int(parts[2])
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.message.reply_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
         field = parts[3]
         try:
             dev = _get_device_by_index(idx)
@@ -3374,7 +3383,11 @@ async def callback_device(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == 'rename' and len(parts) >= 3:
-        idx = int(parts[2])
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.message.reply_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
         try:
             dev = _get_device_by_index(idx)
         except Exception as exc:
@@ -3394,7 +3407,11 @@ async def callback_device(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == 'remove' and len(parts) >= 3:
-        idx = int(parts[2])
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.message.reply_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
         try:
             dev = _get_device_by_index(idx)
         except Exception as exc:
@@ -3409,7 +3426,11 @@ async def callback_device(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == 'confirm_remove' and len(parts) >= 3:
-        idx = int(parts[2])
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.edit_message_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
         devices = settings.get_devices()
         if idx < 0 or idx >= len(devices):
             await query.edit_message_text('❌ Device no longer exists. Refresh /device and try again.')
