@@ -220,7 +220,7 @@ def _device_panel_text(statuses: list) -> str:
         line = (
             f'\n<b>{idx}. {html.escape(s["name"])}</b> {icon}\n'
             f'IP: <code>{html.escape(s["ip"])}</code>\n'
-            f'Port: <code>{s.get("port", 4370)}</code>'
+            f'Port: <code>{html.escape(str(s.get("port", 4370)))}</code>'
         )
         extras = []
         if s.get('users') is not None:
@@ -3241,11 +3241,11 @@ def _validate_device_ip(ip_text: str, devices: list, exclude_index: int = None) 
 def _validate_device_name(name_text: str, devices: list, exclude_index: int = None) -> str:
     if not name_text.strip():
         raise ValueError('Device name cannot be empty.')
-    name = ' '.join(name_text.strip().split())
+    name = _normalize_whitespace(name_text)
     for i, dev in enumerate(devices):
         if exclude_index is not None and i == exclude_index:
             continue
-        existing = ' '.join(str(dev.get('name', '')).strip().split())
+        existing = _normalize_whitespace(str(dev.get('name', '')))
         if existing.lower() == name.lower():
             raise ValueError(f"Device name '{name}' conflicts with existing device '{existing}'.")
     return name
@@ -3259,6 +3259,10 @@ def _validate_device_port(port_text: str) -> int:
     if not (1 <= port <= 65535):
         raise ValueError('Port must be a number between 1 and 65535.')
     return port
+
+
+def _normalize_whitespace(value: str) -> str:
+    return ' '.join(value.strip().split())
 
 
 async def _send_device_panel(chat, prefix: str = ''):

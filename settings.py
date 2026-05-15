@@ -236,7 +236,8 @@ def save_devices(devices: list):
     _cfg['devices']['ips'] = ','.join(d['ip'] for d in clean)
     _cfg['devices']['names'] = ','.join(d['name'] for d in clean)
     _cfg['devices']['ports'] = ','.join(str(d['port']) for d in clean)
-    _cfg['devices']['port'] = _cfg.get('devices', 'port', fallback='4370')
+    if 'port' not in _cfg['devices']:
+        _cfg['devices']['port'] = '4370'
     _save()
 
 
