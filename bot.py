@@ -12,6 +12,9 @@ import configparser
 import html
 import logging
 import os
+import re
+import shlex
+import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from io import BytesIO, StringIO
@@ -58,15 +61,78 @@ EXTRA_USERS = [u.strip() for u in
 os.makedirs(_cfg.get('reports', 'export_dir', fallback='/tmp/zk_reports'),
             exist_ok=True)
 
+_SEC_SECTION = 'security'
+SHELL_PASSWORD = _cfg.get(_SEC_SECTION, 'shell_password', fallback='').strip()
+SHELL_ROOT_PASSWORD = _cfg.get(_SEC_SECTION, 'shell_root_password', fallback='').strip()
+SHELL_SESSION_TIMEOUT_MINUTES = _cfg.getint(_SEC_SECTION, 'shell_session_timeout_minutes', fallback=5)
+SHELL_MAX_FAILED_ATTEMPTS = max(1, _cfg.getint(_SEC_SECTION, 'shell_max_failed_attempts', fallback=3))
+SHELL_LOCKOUT_MINUTES = max(1, _cfg.getint(_SEC_SECTION, 'shell_lockout_minutes', fallback=10))
+SHELL_CMD_TIMEOUT_SECONDS = max(1, _cfg.getint(_SEC_SECTION, 'shell_cmd_timeout_seconds', fallback=8))
+SQL_MAX_ROWS = max(1, _cfg.getint(_SEC_SECTION, 'sql_max_rows', fallback=50))
+SQL_MAX_TEXT_CHARS = max(500, _cfg.getint(_SEC_SECTION, 'sql_max_text_chars', fallback=3200))
+AUDIT_LOG_PATH = _cfg.get(_SEC_SECTION, 'audit_log_path', fallback='audit.log').strip() or 'audit.log'
+
+_presence_state: dict = {}      # user_id -> {name, username, last_seen, last_activity}
+_shell_auth_state: dict = {}    # chat_id -> pending auth state
+_shell_sessions: dict = {}      # chat_id -> active shell session
+_shell_lockouts: dict = {}      # user_id -> lockout metadata
+_sql_prompt_state: dict = {}    # chat_id -> pending sql input metadata
+
+_audit_logger = logging.getLogger('ZKBot.Audit')
+if not _audit_logger.handlers:
+    _audit_handler = logging.FileHandler(AUDIT_LOG_PATH)
+    _audit_handler.setFormatter(logging.Formatter(
+        '%(asctime)s|%(levelname)s|%(message)s', '%Y-%m-%d %H:%M:%S'
+    ))
+    _audit_logger.addHandler(_audit_handler)
+_audit_logger.setLevel(logging.INFO)
+_audit_logger.propagate = False
+
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
 def _allowed(update: Update) -> bool:
     uid  = str(update.effective_user.id)
     cid  = str(update.effective_chat.id)
-    return cid == CHAT_ID or uid == CHAT_ID or uid in EXTRA_USERS
+    allowed = cid == CHAT_ID or uid == CHAT_ID or uid in EXTRA_USERS
+    if allowed:
+        activity = ''
+        msg = getattr(update, 'effective_message', None)
+        if msg and msg.text:
+            activity = msg.text.strip()[:120]
+        cbq = getattr(update, 'callback_query', None)
+        if not activity and cbq and cbq.data:
+            activity = f'callback:{cbq.data[:80]}'
+        _presence_state[uid] = {
+            'name': update.effective_user.full_name,
+            'username': update.effective_user.username or '',
+            'last_seen': datetime.now(),
+            'last_activity': activity or 'activity',
+        }
+    return allowed
 
 async def _deny(update: Update):
     await update.message.reply_text('⛔ Unauthorized.')
+
+
+def _safe_display_name(update: Update) -> str:
+    user = update.effective_user
+    if not user:
+        return 'unknown'
+    if user.username:
+        return f'@{user.username}'
+    return user.full_name or str(user.id)
+
+
+def _audit(event: str, update: Update = None, detail: str = ''):
+    if update and update.effective_user:
+        uid = str(update.effective_user.id)
+        name = _safe_display_name(update).replace('|', '/')
+    else:
+        uid = '-'
+        name = '-'
+    chat_id = str(update.effective_chat.id) if update and update.effective_chat else '-'
+    cleaned = (detail or '').replace('\n', ' ').replace('|', '/')
+    _audit_logger.info(f'event={event}|uid={uid}|user={name}|chat={chat_id}|detail={cleaned}')
 
 # ─── Formatting helpers ───────────────────────────────────────────────────────
 
@@ -347,6 +413,14 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/editdaily — configure scheduled daily report settings\n"
         "/editemail — configure Gmail SMTP email delivery, send time, and days (optional)\n"
         "/mail — send attendance report via email (today or pick date)\n\n"
+        "<b>Admin & Security</b>\n"
+        "/admin — admin control panel\n"
+        "/shell — open protected limited shell session\n"
+        "/su — elevate current shell session (requires root password)\n"
+        "/sql &lt;SELECT ...&gt; — run read-only SQL query (SELECT only)\n"
+        "/auditlog [N|YYYY-MM-DD] — view audit entries\n"
+        "/presence or /status — show authorized users last activity\n"
+        "/exit — end active shell/sql prompt session\n\n"
         "<b>Database</b>\n"
         "/stats — MDB stats\n"
         "/mdbinfo — MDB path + file info\n"
@@ -360,6 +434,249 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/workdays — read-only workday configuration view\n"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+def _admin_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('🖥 Shell', callback_data='adm:shell'),
+            InlineKeyboardButton('🧮 SQL', callback_data='adm:sql'),
+        ],
+        [
+            InlineKeyboardButton('📜 Audit', callback_data='adm:audit'),
+            InlineKeyboardButton('👥 Presence', callback_data='adm:presence'),
+        ],
+        [
+            InlineKeyboardButton('⚙️ Config', callback_data='adm:config'),
+            InlineKeyboardButton('👤 Users', callback_data='adm:users'),
+        ],
+        [InlineKeyboardButton('📢 Notice', callback_data='adm:notice')],
+    ])
+
+
+def _presence_lines() -> list:
+    lines = ['👥 <b>User Presence</b>\n']
+    now = datetime.now()
+    if not _presence_state:
+        lines.append('No activity recorded yet.')
+        return lines
+    ordered = sorted(_presence_state.values(), key=lambda x: x['last_seen'], reverse=True)
+    for st in ordered:
+        delta = now - st['last_seen']
+        mins = max(0, int(delta.total_seconds() // 60))
+        ago = f'{mins}m ago'
+        if mins >= 60:
+            ago = f'{mins // 60}h {mins % 60}m ago'
+        user = html.escape(st['name'])
+        if st.get('username'):
+            user += f" (@{html.escape(st['username'])})"
+        activity = html.escape(st.get('last_activity') or 'activity')
+        lines.append(f"• {user}\n  Last seen: {st['last_seen'].strftime('%Y-%m-%d %H:%M:%S')} ({ago})\n  Activity: <code>{activity[:80]}</code>")
+    return lines
+
+
+def _read_audit_lines(limit: int = 20, day: str = '') -> list:
+    if not os.path.isfile(AUDIT_LOG_PATH):
+        return ['No audit log file yet.']
+    try:
+        with open(AUDIT_LOG_PATH, 'r', encoding='utf-8', errors='replace') as fh:
+            lines = [ln.strip() for ln in fh if ln.strip()]
+    except OSError as exc:
+        return [f'Failed to read audit log: {exc}']
+    if day:
+        lines = [ln for ln in lines if ln.startswith(day)]
+    return lines[-limit:] if limit > 0 else lines
+
+
+async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    _audit('admin.open', update, 'opened /admin panel')
+    await update.message.reply_text(
+        '🛠 <b>Admin Panel</b>\nSelect an action:',
+        parse_mode=ParseMode.HTML,
+        reply_markup=_admin_menu_kb()
+    )
+
+
+async def cmd_presence(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    lines = _presence_lines()
+    for chunk in _split('\n'.join(lines)):
+        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
+async def cmd_auditlog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    limit = 20
+    day = ''
+    if ctx.args:
+        arg = ctx.args[0].strip()
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', arg):
+            day = arg
+        elif arg.isdigit():
+            limit = max(1, min(int(arg), 200))
+        else:
+            await update.message.reply_text('Usage: /auditlog [N|YYYY-MM-DD]')
+            return
+    lines = _read_audit_lines(limit=limit, day=day)
+    _audit('auditlog.view', update, f'limit={limit} day={day or "-"} results={len(lines)}')
+    header = f'📜 <b>Audit Log</b> ({len(lines)} entr{"y" if len(lines)==1 else "ies"})'
+    text = header + '\n\n' + '\n'.join(html.escape(ln) for ln in lines)
+    for chunk in _split(text):
+        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
+async def cmd_shell(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    user_id = str(update.effective_user.id)
+    chat_id = str(update.effective_chat.id)
+    locked, mins = _is_locked_out(user_id)
+    if locked:
+        _audit('shell.locked', update, f'locked={mins}m')
+        await update.message.reply_text(f'⛔ Shell access locked. Try again in {mins} minute(s).')
+        return
+    if not SHELL_PASSWORD:
+        _audit('shell.denied', update, 'shell password not configured')
+        await update.message.reply_text('❌ Shell is not configured. Set [security] shell_password in config.ini.')
+        return
+    _shell_auth_state[chat_id] = {
+        'user_id': user_id,
+        'stage': 'shell',
+        'expires_at': datetime.now() + timedelta(minutes=2),
+    }
+    _audit('shell.auth.prompt', update, 'requested shell auth')
+    await update.message.reply_text(
+        '🔒 Enter shell session password.\n'
+        'Session unlock expires in 2 minutes.',
+    )
+
+
+async def cmd_su(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    chat_id = str(update.effective_chat.id)
+    user_id = str(update.effective_user.id)
+    sess = _get_active_shell(chat_id)
+    if not sess or sess.get('user_id') != user_id:
+        await update.message.reply_text('❌ No active shell session for you. Start with /shell.')
+        return
+    if not SHELL_ROOT_PASSWORD:
+        await update.message.reply_text('❌ Root escalation is not configured.')
+        return
+    _shell_auth_state[chat_id] = {
+        'user_id': user_id,
+        'stage': 'su',
+        'expires_at': datetime.now() + timedelta(minutes=2),
+    }
+    _audit('shell.su.prompt', update, 'requested su password')
+    await update.message.reply_text('🔒 Enter root shell password to elevate this session.')
+
+
+async def cmd_exit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    chat_id = str(update.effective_chat.id)
+    user_id = str(update.effective_user.id)
+    sess = _shell_sessions.get(chat_id)
+    if sess and sess.get('user_id') == user_id:
+        _shell_sessions.pop(chat_id, None)
+        _shell_auth_state.pop(chat_id, None)
+        _audit('shell.end', update, 'session ended by /exit')
+        await update.message.reply_text('✅ Shell session ended.')
+        return
+    prompt = _sql_prompt_state.get(chat_id)
+    if prompt and prompt.get('user_id') == user_id:
+        _sql_prompt_state.pop(chat_id, None)
+        _audit('sql.prompt.end', update, 'sql prompt ended by /exit')
+        await update.message.reply_text('✅ SQL prompt ended.')
+        return
+    await update.message.reply_text('ℹ️ No active shell/sql prompt session to exit.')
+
+
+async def cmd_sql(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    query = ' '.join(ctx.args).strip()
+    chat_id = str(update.effective_chat.id)
+    user_id = str(update.effective_user.id)
+    if not query:
+        _sql_prompt_state[chat_id] = {
+            'user_id': user_id,
+            'expires_at': datetime.now() + timedelta(minutes=5),
+        }
+        await update.message.reply_text(
+            '🧮 SQL read-only console ready for 5 minutes.\n'
+            'Send a SELECT query as plain text.\n'
+            'Only simple SELECT ... FROM ... [WHERE col=value AND ...] [LIMIT N].\n'
+            'Send /exit to close.'
+        )
+        _audit('sql.prompt.start', update, 'started SQL prompt session')
+        return
+    ok, result, csv_buf = _execute_readonly_sql(query)
+    _audit('sql.query', update, f'ok={ok} query={query[:180]}')
+    if not ok:
+        await update.message.reply_text(f'❌ {result}')
+        return
+    await update.message.reply_text(f'✅ <b>SQL Result</b>\n<code>{html.escape(result)}</code>', parse_mode=ParseMode.HTML)
+    if csv_buf:
+        csv_buf.seek(0)
+        await update.message.reply_document(
+            document=csv_buf,
+            filename=f"sql_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            caption='Read-only SQL result (CSV)'
+        )
+
+
+async def callback_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not _allowed(update):
+        return
+    data = query.data or ''
+    action = data.split(':', 1)[1] if ':' in data else ''
+    if action == 'shell':
+        await query.edit_message_text('🖥 Use /shell to start a protected limited shell session.')
+        return
+    if action == 'sql':
+        await query.edit_message_text('🧮 Use /sql <SELECT ...> or /sql to open prompt mode.')
+        return
+    if action == 'audit':
+        await query.edit_message_text('📜 Use /auditlog 20 or /auditlog YYYY-MM-DD.')
+        return
+    if action == 'presence':
+        await query.edit_message_text('\n'.join(_presence_lines()), parse_mode=ParseMode.HTML)
+        return
+    if action == 'config':
+        shell_set = '✅' if bool(SHELL_PASSWORD) else '❌'
+        root_set = '✅' if bool(SHELL_ROOT_PASSWORD) else '❌'
+        text = (
+            '⚙️ <b>Security Config Status</b>\n\n'
+            f'Shell password configured: {shell_set}\n'
+            f'Root shell password configured: {root_set}\n'
+            f'Session timeout: {SHELL_SESSION_TIMEOUT_MINUTES} min\n'
+            f'Lockout: {SHELL_MAX_FAILED_ATTEMPTS} attempts / {SHELL_LOCKOUT_MINUTES} min'
+        )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+        return
+    if action == 'users':
+        all_users = [CHAT_ID] + EXTRA_USERS
+        text = '👤 <b>Authorized Users</b>\n\n' + '\n'.join(f'• <code>{html.escape(str(u))}</code>' for u in all_users if str(u).strip())
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+        return
+    if action == 'notice':
+        st = _edit_state.setdefault(str(update.effective_chat.id), {})
+        st['ctx'] = 'admin'
+        st['awaiting'] = 'admin_notice'
+        await query.edit_message_text(
+            '📢 Send notice text in your next message.\n'
+            'It will be posted to this authorized chat.\n'
+            'Use /exit to cancel shell/sql prompt sessions.'
+        )
+        return
+    await query.edit_message_text('Unknown admin action.')
 
 # ── Attendance commands ──────────────────────────────────────────────────────
 
@@ -925,6 +1242,204 @@ _DEFAULT_DAILY_DAYS = '0,1,2,3,6'
 # We cap at 50 chars to be safe.
 _MAX_DEPT_CALLBACK_LEN = 50
 CSV_PREVIEW_MAX_CHARS = 3000
+
+SHELL_BASE_WHITELIST = {
+    'ls', 'cat', 'uptime', 'df', 'free', 'whoami', 'id', 'pwd',
+    'uname', 'date', 'head', 'tail', 'wc', 'echo'
+}
+SHELL_ROOT_WHITELIST = SHELL_BASE_WHITELIST | {'journalctl'}
+SHELL_READ_CMDS = {'ls', 'cat', 'head', 'tail', 'wc'}
+SHELL_BLOCKED_PATH_PARTS = {'/root', '/proc', '/sys', '/dev', '/run'}
+SHELL_BLOCKED_FILE_MARKERS = {'shadow', '.ssh', 'id_rsa', 'id_ed25519'}
+SQL_SELECT_RE = re.compile(
+    r'^\s*select\s+.+\s+from\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+    r'(?:\s+where\s+.+?)?(?:\s+limit\s+\d+)?\s*$',
+    re.IGNORECASE | re.DOTALL
+)
+SQL_DISALLOWED_RE = re.compile(
+    r'(^|\W)(insert|update|delete|drop|alter|create|truncate|replace|'
+    r'grant|revoke|attach|pragma|exec|execute|union)(\W|$)',
+    re.IGNORECASE
+)
+SQL_WHERE_EQ_RE = re.compile(
+    r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([0-9]+))\s*$'
+)
+
+
+def _is_locked_out(user_id: str) -> tuple:
+    st = _shell_lockouts.get(user_id)
+    if not st:
+        return False, 0
+    until = st.get('locked_until')
+    if not until or datetime.now() >= until:
+        _shell_lockouts.pop(user_id, None)
+        return False, 0
+    remain = int((until - datetime.now()).total_seconds() // 60) + 1
+    return True, remain
+
+
+def _register_failed_auth(user_id: str):
+    st = _shell_lockouts.setdefault(user_id, {'failed': 0, 'locked_until': None})
+    st['failed'] = int(st.get('failed', 0)) + 1
+    if st['failed'] >= SHELL_MAX_FAILED_ATTEMPTS:
+        st['locked_until'] = datetime.now() + timedelta(minutes=SHELL_LOCKOUT_MINUTES)
+        st['failed'] = 0
+
+
+def _clear_failed_auth(user_id: str):
+    _shell_lockouts.pop(user_id, None)
+
+
+def _get_active_shell(chat_id: str):
+    sess = _shell_sessions.get(chat_id)
+    if not sess:
+        return None
+    if datetime.now() > sess['expires_at']:
+        _shell_sessions.pop(chat_id, None)
+        return None
+    return sess
+
+
+def _is_safe_read_path(raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    if raw_path.startswith('-'):
+        return False
+    if '..' in raw_path:
+        return False
+    full = os.path.realpath(raw_path if raw_path.startswith('/') else os.path.join(os.getcwd(), raw_path))
+    for part in SHELL_BLOCKED_PATH_PARTS:
+        if full == part or full.startswith(part + os.sep):
+            return False
+    lowered = full.lower()
+    if any(mark in lowered for mark in SHELL_BLOCKED_FILE_MARKERS):
+        return False
+    return True
+
+
+def _run_safe_shell_command(command_text: str, elevated: bool = False) -> tuple:
+    if any(sym in command_text for sym in ['|', '&', ';', '>', '<', '`', '$(', '${', '\n', '\r']):
+        return False, 'Command syntax not allowed.'
+    try:
+        parts = shlex.split(command_text)
+    except ValueError:
+        return False, 'Unable to parse command.'
+    if not parts:
+        return False, 'Empty command.'
+    cmd = parts[0].lower()
+    allowed_set = SHELL_ROOT_WHITELIST if elevated else SHELL_BASE_WHITELIST
+    if cmd not in allowed_set:
+        return False, f'Command "{cmd}" is not allowed.'
+    if cmd in SHELL_READ_CMDS:
+        args = [a for a in parts[1:] if not a.startswith('-')]
+        if not args:
+            return False, f'{cmd} requires a file path.'
+        for p in args:
+            if not _is_safe_read_path(p):
+                return False, f'Blocked unsafe path: {p}'
+    try:
+        proc = subprocess.run(
+            parts,
+            capture_output=True,
+            text=True,
+            timeout=SHELL_CMD_TIMEOUT_SECONDS,
+            shell=False,
+            cwd=os.getcwd(),
+        )
+    except subprocess.TimeoutExpired:
+        return False, f'Command timed out after {SHELL_CMD_TIMEOUT_SECONDS}s.'
+    except Exception as exc:
+        return False, f'Execution error: {str(exc)[:120]}'
+    out = (proc.stdout or '').strip()
+    err = (proc.stderr or '').strip()
+    text = out if out else err
+    if not text:
+        text = '(no output)'
+    if len(text) > 3500:
+        text = text[:3500] + '\n...[truncated]'
+    if proc.returncode != 0 and not err:
+        text = f'Command exited with code {proc.returncode}\n{text}'
+    return True, text
+
+
+def _validate_select_query(query: str) -> tuple:
+    q = (query or '').strip()
+    if not q:
+        return False, 'Query is empty.'
+    if len(q) > 500:
+        return False, 'Query too long.'
+    if ';' in q:
+        return False, 'Semicolons are not allowed.'
+    if '--' in q or '/*' in q or '*/' in q:
+        return False, 'SQL comments are not allowed.'
+    if SQL_DISALLOWED_RE.search(q):
+        return False, 'Only read-only SELECT statements are allowed.'
+    m = SQL_SELECT_RE.match(q)
+    if not m:
+        return False, 'Only simple SELECT ... FROM ... [WHERE ...] [LIMIT N] syntax is allowed.'
+    return True, ''
+
+
+def _execute_readonly_sql(query: str) -> tuple:
+    ok, err = _validate_select_query(query)
+    if not ok:
+        return False, err, None
+    q = query.strip()
+    m = SQL_SELECT_RE.match(q)
+    table = m.group(1)
+    try:
+        tables = {t.lower(): t for t in mdb_reader.list_tables()}
+    except Exception as exc:
+        return False, f'Failed to inspect MDB tables: {exc}', None
+    if table.lower() not in tables:
+        return False, f'Unknown table: {table}', None
+    table_real = tables[table.lower()]
+    try:
+        rows = mdb_reader._mdb_export(table_real)
+    except Exception as exc:
+        return False, f'Failed to read table: {exc}', None
+    if not rows:
+        return True, 'No rows found.', None
+    df = pd.DataFrame(rows)
+
+    lower_q = q.lower()
+    where_clause = None
+    if ' where ' in lower_q:
+        where_start = lower_q.index(' where ') + len(' where ')
+        where_text = q[where_start:]
+        limit_pos = where_text.lower().rfind(' limit ')
+        where_clause = where_text[:limit_pos].strip() if limit_pos != -1 else where_text.strip()
+    if where_clause:
+        conds = [c.strip() for c in re.split(r'\s+and\s+', where_clause, flags=re.IGNORECASE) if c.strip()]
+        for c in conds:
+            cm = SQL_WHERE_EQ_RE.match(c)
+            if not cm:
+                return False, 'WHERE only supports equality with AND (col = value).', None
+            col = cm.group(1)
+            if col not in df.columns:
+                return False, f'Unknown WHERE column: {col}', None
+            val = cm.group(2) if cm.group(2) is not None else cm.group(3) if cm.group(3) is not None else cm.group(4)
+            df = df[df[col].astype(str) == str(val)]
+
+    select_section = q[q.lower().index('select') + 6:q.lower().index(' from ')].strip()
+    if select_section != '*':
+        cols = [c.strip() for c in select_section.split(',') if c.strip()]
+        for c in cols:
+            if c not in df.columns:
+                return False, f'Unknown SELECT column: {c}', None
+        df = df[cols]
+
+    limit = SQL_MAX_ROWS
+    limit_m = re.search(r'\s+limit\s+(\d+)\s*$', q, flags=re.IGNORECASE)
+    if limit_m:
+        limit = min(int(limit_m.group(1)), SQL_MAX_ROWS)
+    df = df.head(limit).fillna('')
+    text = df.to_string(index=False) if not df.empty else 'No rows found.'
+    if len(text) <= SQL_MAX_TEXT_CHARS:
+        footer = f'\nRows: {len(df)} (limit {limit}, hard max {SQL_MAX_ROWS})'
+        return True, text + footer, None
+    csv_bytes = df.to_csv(index=False).encode('utf-8')
+    return True, f'Result too large for text. Sending CSV ({len(df)} rows).', BytesIO(csv_bytes)
 
 
 def _get_dept_list() -> list:
@@ -1748,11 +2263,134 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _allowed(update):
         return
     chat_id = str(update.effective_chat.id)
+    user_id = str(update.effective_user.id)
+    text = (update.message.text or '').strip()
+
+    # ── Shell password prompts (/shell and /su) ───────────────────────────────
+    auth = _shell_auth_state.get(chat_id)
+    if auth:
+        if datetime.now() > auth.get('expires_at', datetime.now()):
+            _shell_auth_state.pop(chat_id, None)
+            await update.message.reply_text('⌛ Shell authentication expired. Send /shell again.')
+            return
+        if auth.get('user_id') != user_id:
+            return
+        stage = auth.get('stage')
+        if stage == 'shell':
+            if text == SHELL_PASSWORD:
+                _shell_auth_state.pop(chat_id, None)
+                _clear_failed_auth(user_id)
+                _shell_sessions[chat_id] = {
+                    'user_id': user_id,
+                    'started_at': datetime.now(),
+                    'expires_at': datetime.now() + timedelta(minutes=SHELL_SESSION_TIMEOUT_MINUTES),
+                    'elevated': False,
+                }
+                _audit('shell.auth.success', update, 'shell unlocked')
+                await update.message.reply_text(
+                    f'✅ Shell unlocked for {SHELL_SESSION_TIMEOUT_MINUTES} minutes.\n'
+                    'Allowed commands only. Send /exit to end. Send su or /su to elevate.'
+                )
+            else:
+                _register_failed_auth(user_id)
+                locked, mins = _is_locked_out(user_id)
+                _audit('shell.auth.failed', update, f'locked={locked}')
+                _shell_auth_state.pop(chat_id, None)
+                if locked:
+                    await update.message.reply_text(f'⛔ Too many attempts. Locked for {mins} minute(s).')
+                else:
+                    await update.message.reply_text('❌ Incorrect shell password.')
+            return
+        if stage == 'su':
+            sess = _get_active_shell(chat_id)
+            if not sess or sess.get('user_id') != user_id:
+                _shell_auth_state.pop(chat_id, None)
+                await update.message.reply_text('❌ No active shell session. Start with /shell.')
+                return
+            if text == SHELL_ROOT_PASSWORD:
+                _shell_auth_state.pop(chat_id, None)
+                _clear_failed_auth(user_id)
+                sess['elevated'] = True
+                sess['expires_at'] = datetime.now() + timedelta(minutes=SHELL_SESSION_TIMEOUT_MINUTES)
+                _audit('shell.su.success', update, 'session elevated')
+                await update.message.reply_text('✅ Session elevated. Root-level safe whitelist is active.')
+            else:
+                _register_failed_auth(user_id)
+                locked, mins = _is_locked_out(user_id)
+                _audit('shell.su.failed', update, f'locked={locked}')
+                _shell_auth_state.pop(chat_id, None)
+                if locked:
+                    await update.message.reply_text(f'⛔ Too many attempts. Locked for {mins} minute(s).')
+                else:
+                    await update.message.reply_text('❌ Incorrect root password.')
+            return
+
+    # ── Shell command mode ────────────────────────────────────────────────────
+    sess = _get_active_shell(chat_id)
+    if sess:
+        if sess.get('user_id') != user_id:
+            await update.message.reply_text('⛔ Another admin is currently using /shell in this chat.')
+            return
+        if text.lower() in ('/exit', 'exit'):
+            _shell_sessions.pop(chat_id, None)
+            _audit('shell.end', update, 'session ended by text exit')
+            await update.message.reply_text('✅ Shell session ended.')
+            return
+        if text.lower() in ('su', '/su'):
+            if not SHELL_ROOT_PASSWORD:
+                await update.message.reply_text('❌ Root escalation is not configured.')
+                return
+            _shell_auth_state[chat_id] = {
+                'user_id': user_id,
+                'stage': 'su',
+                'expires_at': datetime.now() + timedelta(minutes=2),
+            }
+            _audit('shell.su.prompt', update, 'requested via text su')
+            await update.message.reply_text('🔒 Enter root shell password to elevate this session.')
+            return
+        ok, output = _run_safe_shell_command(text, elevated=bool(sess.get('elevated')))
+        sess['expires_at'] = datetime.now() + timedelta(minutes=SHELL_SESSION_TIMEOUT_MINUTES)
+        _audit('shell.cmd', update, f'ok={ok} elevated={int(bool(sess.get("elevated")))} cmd={text[:120]}')
+        status = '✅' if ok else '❌'
+        await update.message.reply_text(
+            f'{status} <code>{html.escape(output)}</code>',
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # ── SQL prompt mode ───────────────────────────────────────────────────────
+    sql_prompt = _sql_prompt_state.get(chat_id)
+    if sql_prompt:
+        if datetime.now() > sql_prompt.get('expires_at', datetime.now()):
+            _sql_prompt_state.pop(chat_id, None)
+            await update.message.reply_text('⌛ SQL prompt expired. Send /sql again.')
+            return
+        if sql_prompt.get('user_id') != user_id:
+            return
+        if text.lower() in ('/exit', 'exit'):
+            _sql_prompt_state.pop(chat_id, None)
+            _audit('sql.prompt.end', update, 'sql prompt ended by text exit')
+            await update.message.reply_text('✅ SQL prompt ended.')
+            return
+        ok, result, csv_buf = _execute_readonly_sql(text)
+        _audit('sql.query', update, f'ok={ok} query={text[:180]}')
+        if not ok:
+            await update.message.reply_text(f'❌ {result}')
+            return
+        await update.message.reply_text(f'✅ <b>SQL Result</b>\n<code>{html.escape(result)}</code>', parse_mode=ParseMode.HTML)
+        if csv_buf:
+            csv_buf.seek(0)
+            await update.message.reply_document(
+                document=csv_buf,
+                filename=f"sql_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                caption='Read-only SQL result (CSV)'
+            )
+        return
+
     st = _edit_state.get(chat_id)
     if not st or not st.get('awaiting'):
         return  # nothing awaiting — ignore
 
-    text = (update.message.text or '').strip()
     awaiting = st['awaiting']
 
     if awaiting == 'time':
@@ -1927,6 +2565,17 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f'✅ Subject set to:\n<code>{text}</code>\n\n'
             'Use /editemail to review all settings.',
             parse_mode=ParseMode.HTML)
+        return
+
+    if awaiting == 'admin_notice':
+        st['awaiting'] = None
+        _audit('admin.notice', update, f'len={len(text)}')
+        await ctx.bot.send_message(
+            chat_id=int(CHAT_ID),
+            text=f'📢 <b>Admin Notice</b>\n\n{html.escape(text)}',
+            parse_mode=ParseMode.HTML
+        )
+        await update.message.reply_text('✅ Notice sent.')
         return
 
 # ── Employee commands ─────────────────────────────────────────────────────────
@@ -2844,6 +3493,15 @@ def main():
         ('editdaily',   cmd_editdaily),
         ('editemail',   cmd_editemail),
         ('mail',        cmd_mail),
+        # Admin & Security
+        ('admin',       cmd_admin),
+        ('shell',       cmd_shell),
+        ('su',          cmd_su),
+        ('sql',         cmd_sql),
+        ('auditlog',    cmd_auditlog),
+        ('presence',    cmd_presence),
+        ('status',      cmd_presence),
+        ('exit',        cmd_exit),
         # DB
         ('stats',       cmd_stats),
         ('mdbinfo',     cmd_mdbinfo),
@@ -2863,6 +3521,7 @@ def main():
     # Callback query handlers — route by prefix
     app.add_handler(CallbackQueryHandler(callback_edit,
                                          pattern=r'^(er:|ed:|ee:)'))
+    app.add_handler(CallbackQueryHandler(callback_admin, pattern=r'^adm:'))
     app.add_handler(CallbackQueryHandler(callback_calendar))
 
     # Text input handler (for edit panel awaiting states)
