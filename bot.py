@@ -3234,7 +3234,7 @@ def _validate_device_ip(ip_text: str, devices: list, exclude_index: int = None) 
         if exclude_index is not None and i == exclude_index:
             continue
         if dev['ip'] == ip:
-            raise ValueError(f'Device IP {ip} already exists.')
+            raise ValueError(f"Device IP '{ip}' already exists.")
     return ip
 
 
@@ -3247,7 +3247,7 @@ def _validate_device_name(name_text: str, devices: list, exclude_index: int = No
             continue
         existing = ' '.join(str(dev.get('name', '')).strip().split())
         if existing.lower() == name.lower():
-            raise ValueError(f'Device name "{name}" conflicts with existing device "{existing}".')
+            raise ValueError(f"Device name '{name}' conflicts with existing device '{existing}'.")
     return name
 
 
