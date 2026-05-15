@@ -1675,7 +1675,7 @@ async def callback_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 '🕐 <b>Set Email Send Time</b>\n\n'
                 f'Current: <b>{current}</b>\n\n'
-                'Reply with the new time in <b>HH:MM</b> format (24h).\n'
+                'Reply with the new time in <b>HH:MM</b> format (24h, zero-padded).\n'
                 'Example: <code>08:15</code>',
                 parse_mode=ParseMode.HTML)
             return
@@ -1866,7 +1866,7 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f'✅ Email send time set to <b>{h:02d}:{m:02d}</b>\n'
                 'Use /editemail to review all settings.',
                 parse_mode=ParseMode.HTML)
-        except Exception:
+        except ValueError:
             await update.message.reply_text(
                 '❌ Invalid format. Please send time as <code>HH:MM</code> (24h, zero-padded), '
                 'e.g. <code>08:15</code>.',
