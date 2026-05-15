@@ -339,11 +339,26 @@ app_password         =                # Gmail App Password (not account password
 recipients           =                # comma-separated recipient addresses
 subject              = Daily Absent Report - {date}  # {date} is replaced at send time
 format               = html           # html | plain | both (multipart/alternative)
+
+[security]
+shell_password              =          # required for /shell (bot-specific password, not system password)
+shell_root_password         =          # optional second password for /su elevation
+shell_session_timeout_minutes = 5      # auto-end shell session timeout
+shell_max_failed_attempts   = 3        # lockout threshold for shell/su auth
+shell_lockout_minutes       = 10       # lockout duration
+shell_cmd_timeout_seconds   = 8        # per command execution timeout
+shell_base_dir              = /tmp     # base dir for relative shell paths
+shell_allowed_paths         = /tmp,/var/log,/etc  # allowlisted readable paths for ls/cat/head/tail/wc
+sql_max_rows                = 50       # hard max rows returned by /sql
+sql_max_text_chars          = 3200     # text output cap before CSV fallback
+audit_log_path              = audit.log
 ```
 
 > **SMTP is disabled by default (`enabled = 0`).** All existing Telegram functionality is unchanged. Enable it by running `/editemail` in the bot.
 >
 > **Gmail App Password:** create one at *Google Account → Security → 2-Step Verification → App Passwords*. Use the 16-character password here — never your main Google account password.
+>
+> **Security passwords:** `shell_password` and `shell_root_password` are bot feature passwords only. Do not reuse Linux/system/root account passwords.
 
 ---
 
@@ -499,6 +514,18 @@ sudo journalctl -u zkbot -f    # live logs
 | `/editemail` | Interactive panel — configure Gmail SMTP email delivery (see below) |
 | `/mail` | Send attendance report by email — **Today** button or interactive date-picker calendar |
 
+### Admin & Security
+
+| Command | Description |
+|---------|-------------|
+| `/admin` | Inline admin panel for quick actions (shell/sql/logs/presence/config/users/notice) |
+| `/shell` | Password-gated limited shell session (strict whitelist, timeout, lockout, audit logging) |
+| `/su` | Optional shell session elevation using separate `shell_root_password` |
+| `/sql <SELECT ...>` | Read-only SQL console. Only validated `SELECT` queries are allowed; result is text/CSV with limits |
+| `/auditlog [N\|YYYY-MM-DD]` | Show recent audit entries (count or by date filter) |
+| `/presence` or `/status` | Show last seen/activity for authorized Telegram users |
+| `/exit` | End active shell/sql prompt session |
+
 #### `/editemail` — Gmail SMTP settings
 
 All email configuration is managed entirely through this Telegram command — no manual `config.ini` editing is required.
@@ -544,6 +571,9 @@ Report timing is configurable via `/editdaily`. Email delivery is configurable v
 - **Who-is-in logic** uses odd punch count as a proxy for "currently inside." This may be inaccurate if a device recorded an extra erroneous punch.
 - **Telegram message limit.** The bot splits responses longer than 4000 characters across multiple messages automatically.
 - **Authentication.** Only the `chat_id` specified in config (plus any `allowed_users`) can issue commands. All other senders receive `⛔ Unauthorized.`
+- **Shell security.** `/shell` is disabled unless `[security] shell_password` is set. Commands are whitelist-only, timeout-limited, and audited; failed auth attempts trigger lockout.
+- **SQL security.** `/sql` only accepts read-only `SELECT` statements with strict validation and bounded output. No write query is allowed.
+- **Audit trail.** Security/admin actions are appended to `audit.log` (or `[security] audit_log_path`).
 - **Email is opt-in.** SMTP delivery defaults to disabled (`[smtp] enabled = 0`). Pure Telegram users need not configure it and will see no change in behaviour. Use `/editemail` to enable it.
 - **Gmail App Password.** Standard Gmail passwords do not work. Enable 2-Step Verification on your Google account and generate an App Password at *Google Account → Security → App Passwords*. The password is stored in `config.ini` — treat that file as sensitive.
 - **No new Python dependencies** are required for email. `smtplib` and `email` are part of the Python standard library.
