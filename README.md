@@ -112,6 +112,7 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_punches` | `/punches <badge>` | Lists today's punch times for a specific employee, labelled `→ IN` / `← OUT` by order. |
 | `cmd_employeereport` | `/employeereport <badge>` | Month-to-date read-only attendance report for one employee. |
 | `cmd_calendar` | `/calendar <badge> [YYYY-MM]` | Renders a full-month emoji calendar grid for an employee. Defaults to the current month. |
+| `cmd_device` | `/device` | Admin-only inline device panel. Shows live ping status for each configured device and lets admins add, edit, remove, or rename devices directly in `config.ini`. |
 | `cmd_devices` | `/devices` | Pings all configured ZKTeco devices and reports online status, user count, and device clock. |
 | `cmd_clocksync` | `/clocksync` | Sets the clock on every device to the current system time. |
 | `cmd_reboot` | `/reboot <ip or name>` | Reboots a single device (lookup by IP or human-readable name). |
@@ -312,6 +313,7 @@ mount_point   = /mnt/attdb            # local mount point for UNC paths
 [devices]
 ips     = 10.20.141.21,10.20.141.22   # comma-separated ZKTeco device IPs
 names   = Girls 2,Boys 2              # human-readable names (same order as ips)
+ports   = 4370,4370                   # optional per-device ports (falls back to `port`)
 port    = 4370                        # ZKTeco default port
 timeout = 10                          # connection timeout (seconds)
 
@@ -408,7 +410,7 @@ At minimum, set:
 - `[telegram] bot_token` — get from [@BotFather](https://t.me/BotFather)
 - `[telegram] chat_id` — your user or group ID
 - `[mdb] path` — path to the `.mdb` file
-- `[devices] ips` and `[devices] names`
+- `[devices] ips` and `[devices] names` (optional `[devices] ports` for per-device ports)
 
 ### 5. Run
 
@@ -482,6 +484,7 @@ sudo journalctl -u zkbot -f    # live logs
 
 | Command | Description |
 |---------|-------------|
+| `/device` | Admin-only device panel with live ping status, inline add/edit/remove/rename actions, config persistence, and audit logging |
 | `/devices` | Status of all ZKTeco devices (online/offline, user count, clock) |
 | `/clocksync` | Sync all device clocks to current system time |
 | `/reboot <ip or name>` | Reboot a single device |
@@ -519,6 +522,7 @@ sudo journalctl -u zkbot -f    # live logs
 | Command | Description |
 |---------|-------------|
 | `/admin` | Inline admin panel for quick actions (shell/sql/logs/presence/config/users/notice) |
+| `/device` | Device admin panel — edit `[devices]` in `config.ini` via Telegram inline keyboards, with connectivity validation and audit logs |
 | `/shell` | Password-gated limited shell session (strict whitelist, timeout, lockout, audit logging) |
 | `/su` | Optional shell session elevation using separate `shell_root_password` |
 | `/sql <SELECT ...>` | Read-only SQL console. Only validated `SELECT` queries are allowed; result is text/CSV with limits |

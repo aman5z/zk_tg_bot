@@ -185,6 +185,62 @@ def set_live_punches(val: bool):
     _save()
 
 
+# ─── Device settings ───────────────────────────────────────────────────────────
+
+def get_device_timeout() -> int:
+    return _cfg.getint('devices', 'timeout', fallback=10)
+
+
+def set_device_timeout(val: int):
+    _ensure('devices')
+    _cfg['devices']['timeout'] = str(max(1, int(val)))
+    _save()
+
+
+def get_devices() -> list:
+    _ensure('devices')
+    ips = [i.strip() for i in _cfg.get('devices', 'ips', fallback='').split(',')
+           if i.strip()]
+    names = [n.strip() for n in _cfg.get('devices', 'names', fallback='').split(',')
+             if n.strip()]
+    default_port = _cfg.getint('devices', 'port', fallback=4370)
+    ports_raw = [p.strip() for p in _cfg.get('devices', 'ports', fallback='').split(',')
+                 if p.strip()]
+    timeout = get_device_timeout()
+    devices = []
+    for i, ip in enumerate(ips):
+        port = default_port
+        if i < len(ports_raw):
+            try:
+                port = int(ports_raw[i])
+            except ValueError:
+                port = default_port
+        devices.append({
+            'ip': ip,
+            'name': names[i] if i < len(names) else f'Device {i + 1}',
+            'port': port,
+            'timeout': timeout,
+        })
+    return devices
+
+
+def save_devices(devices: list):
+    _ensure('devices')
+    clean = []
+    for i, dev in enumerate(devices):
+        clean.append({
+            'ip': str(dev.get('ip', '')).strip(),
+            'name': str(dev.get('name', '')).strip() or f'Device {i + 1}',
+            'port': max(1, int(dev.get('port', 4370))),
+        })
+    _cfg['devices']['ips'] = ','.join(d['ip'] for d in clean)
+    _cfg['devices']['names'] = ','.join(d['name'] for d in clean)
+    _cfg['devices']['ports'] = ','.join(str(d['port']) for d in clean)
+    if 'port' not in _cfg['devices']:
+        _cfg['devices']['port'] = '4370'
+    _save()
+
+
 # ─── Read-only telegram/device helpers for notifier ──────────────────────────
 
 def get_chat_id() -> str:

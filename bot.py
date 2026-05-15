@@ -10,6 +10,7 @@ import asyncio
 import calendar as _cal
 import configparser
 import html
+import ipaddress
 import logging
 import os
 import re
@@ -84,6 +85,7 @@ _shell_auth_state: dict = {}    # chat_id -> pending auth state
 _shell_sessions: dict = {}      # chat_id -> active shell session
 _shell_lockouts: dict = {}      # user_id -> lockout metadata
 _sql_prompt_state: dict = {}    # chat_id -> pending sql input metadata
+_device_state: dict = {}        # chat_id -> pending /device prompt state
 
 _audit_logger = logging.getLogger('ZKBot.Audit')
 if not _audit_logger.handlers:
@@ -185,7 +187,7 @@ def _fmt_devices(statuses: list) -> str:
     lines = ['<b>📡 Device Status</b>\n']
     for s in statuses:
         icon = '🟢' if s['online'] else '🔴'
-        line = f"{icon} <b>{s['name']}</b> ({s['ip']})"
+        line = f"{icon} <b>{s['name']}</b> ({s['ip']}:{s.get('port', 4370)})"
         if s['online']:
             extras = []
             if s.get('users'):
@@ -198,6 +200,80 @@ def _fmt_devices(statuses: list) -> str:
             line += f" — <i>{s.get('error','Unreachable')}</i>"
         lines.append(line)
     return '\n'.join(lines)
+
+
+def _device_panel_text(statuses: list) -> str:
+    lines = [
+        '📟 <b>Device Admin Panel</b>',
+        '',
+        'Manage devices in <code>config.ini</code>. Changes apply live and are audit-logged.',
+    ]
+    if not statuses:
+        lines.extend([
+            '',
+            'No devices configured yet.',
+            'Tap <b>Add Device</b> below to create the first entry.',
+        ])
+        return '\n'.join(lines)
+    for idx, s in enumerate(statuses, start=1):
+        icon = '🟢' if s['online'] else '🔴'
+        line = (
+            f'\n<b>{idx}. {html.escape(s["name"])}</b> {icon}\n'
+            f'IP: <code>{html.escape(s["ip"])}</code>\n'
+            f'Port: <code>{html.escape(str(s.get("port", 4370)))}</code>'
+        )
+        extras = []
+        if s.get('users') is not None:
+            extras.append(f'👤 {s["users"]}')
+        if s.get('time'):
+            extras.append(f'🕐 {html.escape(s["time"])}')
+        if extras:
+            line += '\n' + '  '.join(extras)
+        if not s['online'] and s.get('error'):
+            line += f'\nStatus: <i>{html.escape(str(s["error"])[:120])}</i>'
+        lines.append(line)
+    return '\n'.join(lines)
+
+
+def _device_panel_kb(statuses: list) -> InlineKeyboardMarkup:
+    rows = []
+    for idx, s in enumerate(statuses):
+        rows.append([
+            InlineKeyboardButton('✏️ Edit', callback_data=f'dev:edit:{idx}'),
+            InlineKeyboardButton('❌ Remove', callback_data=f'dev:remove:{idx}'),
+            InlineKeyboardButton('🏷 Rename', callback_data=f'dev:rename:{idx}'),
+        ])
+    rows.append([
+        InlineKeyboardButton('➕ Add Device', callback_data='dev:add'),
+        InlineKeyboardButton('🔄 Refresh', callback_data='dev:refresh'),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _device_action_kb(idx: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('🌐 IP', callback_data=f'dev:edit_field:{idx}:ip'),
+            InlineKeyboardButton('🏷 Name', callback_data=f'dev:edit_field:{idx}:name'),
+            InlineKeyboardButton('🔌 Port', callback_data=f'dev:edit_field:{idx}:port'),
+        ],
+        [InlineKeyboardButton('← Back to /device', callback_data='dev:refresh')],
+    ])
+
+
+def _device_remove_kb(idx: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('✅ Yes, remove', callback_data=f'dev:confirm_remove:{idx}'),
+            InlineKeyboardButton('↩ Cancel', callback_data='dev:refresh'),
+        ]
+    ])
+
+
+def _device_cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('❌ Cancel', callback_data='dev:cancel')]
+    ])
 
 def _fmt_today(summary: dict, mode: str = 'full') -> str:
     d = summary
@@ -408,6 +484,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/calendar &lt;badge&gt; — interactive date/range picker\n"
         "/calendar &lt;badge&gt; YYYY-MM — static monthly calendar\n\n"
         "<b>Devices</b>\n"
+        "/device — device admin panel (status/add/edit/remove/rename)\n"
         "/devices — all device status\n"
         "/clocksync — sync all device clocks\n"
         "/reboot &lt;ip or name&gt; | all — reboot a device or all\n"
@@ -456,7 +533,10 @@ def _admin_menu_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton('⚙️ Config', callback_data='adm:config'),
             InlineKeyboardButton('👤 Users', callback_data='adm:users'),
         ],
-        [InlineKeyboardButton('📢 Notice', callback_data='adm:notice')],
+        [
+            InlineKeyboardButton('📟 Device', callback_data='adm:device'),
+            InlineKeyboardButton('📢 Notice', callback_data='adm:notice'),
+        ],
     ])
 
 
@@ -672,6 +752,9 @@ async def callback_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         all_users = [CHAT_ID] + EXTRA_USERS
         text = '👤 <b>Authorized Users</b>\n\n' + '\n'.join(f'• <code>{html.escape(str(u))}</code>' for u in all_users if str(u).strip())
         await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+        return
+    if action == 'device':
+        await query.edit_message_text('📟 Use /device to open the device admin panel.')
         return
     if action == 'notice':
         st = _edit_state.setdefault(str(update.effective_chat.id), {})
@@ -2401,6 +2484,163 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    device_prompt = _device_state.get(chat_id)
+    if device_prompt:
+        if device_prompt.get('user_id') != user_id:
+            return
+        action = device_prompt.get('action')
+        step = device_prompt.get('step')
+        devices = settings.get_devices()
+
+        if action == 'add':
+            draft = device_prompt.setdefault('draft', {})
+            if step == 'ip':
+                try:
+                    ip = _validate_device_ip(text, devices)
+                except ValueError as exc:
+                    await update.message.reply_text(f'❌ {exc}')
+                    return
+                draft['ip'] = ip
+                device_prompt['step'] = 'name'
+                await update.message.reply_text(
+                    '✅ IP accepted.\nNow send the device display name.',
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            if step == 'name':
+                try:
+                    name = _validate_device_name(text, devices)
+                except ValueError as exc:
+                    await update.message.reply_text(f'❌ {exc}')
+                    return
+                draft['name'] = name
+                device_prompt['step'] = 'port'
+                await update.message.reply_text(
+                    '✅ Name accepted.\nNow send the device port (example: <code>4370</code>).',
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            if step == 'port':
+                try:
+                    port = _validate_device_port(text)
+                except ValueError as exc:
+                    await update.message.reply_text(f'❌ {exc}')
+                    return
+                ok, err = zk_devices.check_device_connectivity(draft['ip'], port)
+                if not ok:
+                    await update.message.reply_text(
+                        f'❌ Could not reach <code>{html.escape(draft["ip"])}:{port}</code>.\n'
+                        f'<i>{html.escape(err[:160] or "Connection failed")}</i>\n\n'
+                        'Send a different port, or /device to cancel and restart.',
+                        parse_mode=ParseMode.HTML,
+                    )
+                    return
+                draft['port'] = port
+                devices.append({
+                    'ip': draft['ip'],
+                    'name': draft['name'],
+                    'port': port,
+                })
+                settings.save_devices(devices)
+                _device_state.pop(chat_id, None)
+                _audit('device.add', update,
+                       f'name={draft["name"]} ip={draft["ip"]} port={port}')
+                await _send_device_panel(
+                    update.effective_chat,
+                    prefix=(
+                        f'✅ Added <b>{html.escape(draft["name"])}</b> '
+                        f'(<code>{html.escape(draft["ip"])}:{port}</code>) and verified connectivity.'
+                    ),
+                )
+                return
+
+        if action in ('edit', 'rename'):
+            idx = device_prompt.get('device_index', -1)
+            if idx < 0 or idx >= len(devices):
+                _device_state.pop(chat_id, None)
+                await update.message.reply_text('❌ Device no longer exists. Send /device to refresh.')
+                return
+            current = devices[idx]
+
+            if action == 'rename' or step == 'name':
+                try:
+                    new_name = _validate_device_name(text, devices, exclude_index=idx)
+                except ValueError as exc:
+                    await update.message.reply_text(f'❌ {exc}')
+                    return
+                old_name = current['name']
+                current['name'] = new_name
+                settings.save_devices(devices)
+                _device_state.pop(chat_id, None)
+                event = 'device.rename' if action == 'rename' else 'device.edit'
+                _audit(event, update,
+                       f'field=name old={old_name} new={new_name} ip={current["ip"]} port={current["port"]}')
+                await _send_device_panel(
+                    update.effective_chat,
+                    prefix=f'✅ Renamed <b>{html.escape(old_name)}</b> to <b>{html.escape(new_name)}</b>.',
+                )
+                return
+
+            if step == 'ip':
+                try:
+                    new_ip = _validate_device_ip(text, devices, exclude_index=idx)
+                except ValueError as exc:
+                    await update.message.reply_text(f'❌ {exc}')
+                    return
+                ok, err = zk_devices.check_device_connectivity(new_ip, current['port'])
+                if not ok:
+                    await update.message.reply_text(
+                        f'❌ Could not reach <code>{html.escape(new_ip)}:{current["port"]}</code>.\n'
+                        f'<i>{html.escape(err[:160] or "Connection failed")}</i>\n\n'
+                        'Send another IP address.',
+                        parse_mode=ParseMode.HTML,
+                    )
+                    return
+                old_ip = current['ip']
+                current['ip'] = new_ip
+                settings.save_devices(devices)
+                _device_state.pop(chat_id, None)
+                _audit('device.edit', update,
+                       f'field=ip name={current["name"]} old={old_ip} new={new_ip} port={current["port"]}')
+                await _send_device_panel(
+                    update.effective_chat,
+                    prefix=(
+                        f'✅ Updated IP for <b>{html.escape(current["name"])}</b> '
+                        f'from <code>{html.escape(old_ip)}</code> to <code>{html.escape(new_ip)}</code>.'
+                    ),
+                )
+                return
+
+            if step == 'port':
+                try:
+                    new_port = _validate_device_port(text)
+                except ValueError as exc:
+                    await update.message.reply_text(f'❌ {exc}')
+                    return
+                ok, err = zk_devices.check_device_connectivity(current['ip'], new_port)
+                if not ok:
+                    await update.message.reply_text(
+                        f'❌ Could not reach <code>{html.escape(current["ip"])}:{new_port}</code>.\n'
+                        f'<i>{html.escape(err[:160] or "Connection failed")}</i>\n\n'
+                        'Send another port.',
+                        parse_mode=ParseMode.HTML,
+                    )
+                    return
+                old_port = current['port']
+                current['port'] = new_port
+                settings.save_devices(devices)
+                _device_state.pop(chat_id, None)
+                _audit('device.edit', update,
+                       f'field=port name={current["name"]} ip={current["ip"]} old={old_port} new={new_port}')
+                await _send_device_panel(
+                    update.effective_chat,
+                    prefix=(
+                        f'✅ Updated port for <b>{html.escape(current["name"])}</b> '
+                        f'from <code>{old_port}</code> to <code>{new_port}</code>.'
+                    ),
+                )
+                return
+
     st = _edit_state.get(chat_id)
     if not st or not st.get('awaiting'):
         return  # nothing awaiting — ignore
@@ -2977,6 +3217,235 @@ async def _edit_or_followup(query, update: Update, text: str):
 
 # ── Device commands ───────────────────────────────────────────────────────────
 
+def _get_device_by_index(idx: int) -> dict:
+    devices = settings.get_devices()
+    if idx < 0 or idx >= len(devices):
+        raise IndexError('Device no longer exists. Refresh the panel and try again.')
+    return devices[idx]
+
+
+def _validate_device_ip(ip_text: str, devices: list, exclude_index: int = None) -> str:
+    ip = ip_text.strip()
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        raise ValueError('Please send a valid IPv4/IPv6 address.')
+    for i, dev in enumerate(devices):
+        if exclude_index is not None and i == exclude_index:
+            continue
+        if dev['ip'] == ip:
+            raise ValueError(f"Device IP '{ip}' already exists.")
+    return ip
+
+
+def _validate_device_name(name_text: str, devices: list, exclude_index: int = None) -> str:
+    if not name_text.strip():
+        raise ValueError('Device name cannot be empty.')
+    name = _normalize_whitespace(name_text)
+    for i, dev in enumerate(devices):
+        if exclude_index is not None and i == exclude_index:
+            continue
+        existing = _normalize_whitespace(str(dev.get('name', '')))
+        if existing.lower() == name.lower():
+            raise ValueError(f"Device name '{name}' conflicts with existing device '{existing}'.")
+    return name
+
+
+def _validate_device_port(port_text: str) -> int:
+    try:
+        port = int(port_text.strip())
+    except ValueError:
+        raise ValueError('Port must be a number between 1 and 65535.')
+    if not (1 <= port <= 65535):
+        raise ValueError('Port must be a number between 1 and 65535.')
+    return port
+
+
+def _normalize_whitespace(value: str) -> str:
+    return ' '.join(value.strip().split())
+
+
+async def _send_device_panel(chat, prefix: str = ''):
+    statuses = zk_devices.get_device_status()
+    text = _device_panel_text(statuses)
+    if prefix:
+        text = prefix + '\n\n' + text
+    await chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=_device_panel_kb(statuses))
+
+
+async def cmd_device(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    await update.message.reply_text('⏳ Loading device admin panel...')
+    try:
+        statuses = zk_devices.get_device_status()
+        _audit('device.panel.view', update, f'count={len(statuses)}')
+        await update.message.reply_text(
+            _device_panel_text(statuses),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_device_panel_kb(statuses),
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+
+async def callback_device(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not _allowed(update):
+        return
+    data = query.data or ''
+    chat_id = str(update.effective_chat.id)
+    user_id = str(update.effective_user.id)
+    parts = data.split(':')
+    action = parts[1] if len(parts) > 1 else ''
+
+    if action == 'cancel':
+        _device_state.pop(chat_id, None)
+        await query.edit_message_text('❌ Device action cancelled.')
+        return
+
+    if action == 'refresh':
+        statuses = zk_devices.get_device_status()
+        await query.edit_message_text(
+            _device_panel_text(statuses),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_device_panel_kb(statuses),
+        )
+        return
+
+    if action == 'add':
+        _device_state[chat_id] = {
+            'user_id': user_id,
+            'action': 'add',
+            'step': 'ip',
+            'draft': {},
+        }
+        await query.message.reply_text(
+            '➕ <b>Add Device</b>\n\nSend the new device IP address.',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_device_cancel_kb(),
+        )
+        return
+
+    if action == 'edit' and len(parts) >= 3:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.message.reply_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
+        try:
+            dev = _get_device_by_index(idx)
+        except Exception as exc:
+            await query.message.reply_text(f'❌ {exc}')
+            return
+        await query.message.reply_text(
+            f'✏️ <b>Edit Device</b>\n\n<b>{html.escape(dev["name"])}</b>\n'
+            f'<code>{html.escape(dev["ip"])}:{dev["port"]}</code>\n\nChoose what to update:',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_device_action_kb(idx),
+        )
+        return
+
+    if action == 'edit_field' and len(parts) >= 4:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.message.reply_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
+        field = parts[3]
+        try:
+            dev = _get_device_by_index(idx)
+        except Exception as exc:
+            await query.message.reply_text(f'❌ {exc}')
+            return
+        _device_state[chat_id] = {
+            'user_id': user_id,
+            'action': 'edit',
+            'step': field,
+            'device_index': idx,
+        }
+        prompts = {
+            'ip': f'🌐 Send new IP for <b>{html.escape(dev["name"])}</b>.\nCurrent: <code>{html.escape(dev["ip"])}</code>',
+            'name': f'🏷 Send new name for <b>{html.escape(dev["name"])}</b>.',
+            'port': f'🔌 Send new port for <b>{html.escape(dev["name"])}</b>.\nCurrent: <code>{dev["port"]}</code>',
+        }
+        await query.message.reply_text(
+            prompts.get(field, 'Send the new value.'),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_device_cancel_kb(),
+        )
+        return
+
+    if action == 'rename' and len(parts) >= 3:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.message.reply_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
+        try:
+            dev = _get_device_by_index(idx)
+        except Exception as exc:
+            await query.message.reply_text(f'❌ {exc}')
+            return
+        _device_state[chat_id] = {
+            'user_id': user_id,
+            'action': 'rename',
+            'step': 'name',
+            'device_index': idx,
+        }
+        await query.message.reply_text(
+            f'🏷 <b>Rename Device</b>\n\nSend a new display name for <b>{html.escape(dev["name"])}</b>.',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_device_cancel_kb(),
+        )
+        return
+
+    if action == 'remove' and len(parts) >= 3:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.message.reply_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
+        try:
+            dev = _get_device_by_index(idx)
+        except Exception as exc:
+            await query.message.reply_text(f'❌ {exc}')
+            return
+        await query.message.reply_text(
+            f'❓ Remove <b>{html.escape(dev["name"])}</b>\n'
+            f'<code>{html.escape(dev["ip"])}:{dev["port"]}</code> from <code>[devices]</code>?',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_device_remove_kb(idx),
+        )
+        return
+
+    if action == 'confirm_remove' and len(parts) >= 3:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.edit_message_text('❌ Invalid device reference. Refresh /device and try again.')
+            return
+        devices = settings.get_devices()
+        if idx < 0 or idx >= len(devices):
+            await query.edit_message_text('❌ Device no longer exists. Refresh /device and try again.')
+            return
+        removed = devices.pop(idx)
+        settings.save_devices(devices)
+        _device_state.pop(chat_id, None)
+        _audit('device.remove', update,
+               f'name={removed["name"]} ip={removed["ip"]} port={removed["port"]}')
+        await query.edit_message_text(
+            f'✅ Removed <b>{html.escape(removed["name"])}</b> '
+            f'(<code>{html.escape(removed["ip"])}:{removed["port"]}</code>) from config.',
+            parse_mode=ParseMode.HTML,
+        )
+        await _send_device_panel(
+            update.effective_chat,
+            prefix=f'✅ Device removed by {_safe_display_name(update)}.',
+        )
+        return
+
 async def cmd_devices(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _allowed(update):
         return await _deny(update)
@@ -3495,6 +3964,7 @@ def main():
         ('employeereport', cmd_employeereport),
         ('calendar',    cmd_calendar),
         # Devices
+        ('device',      cmd_device),
         ('devices',     cmd_devices),
         ('clocksync',   cmd_clocksync),
         ('reboot',      cmd_reboot),
@@ -3536,6 +4006,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_edit,
                                          pattern=r'^(er:|ed:|ee:)'))
     app.add_handler(CallbackQueryHandler(callback_admin, pattern=r'^adm:'))
+    app.add_handler(CallbackQueryHandler(callback_device, pattern=r'^dev:'))
     app.add_handler(CallbackQueryHandler(callback_calendar))
 
     # Text input handler (for edit panel awaiting states)
