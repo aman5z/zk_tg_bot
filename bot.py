@@ -238,11 +238,6 @@ def _device_panel_text(statuses: list) -> str:
 def _device_panel_kb(statuses: list) -> InlineKeyboardMarkup:
     rows = []
     for idx, s in enumerate(statuses):
-        icon = '🟢' if s['online'] else '🔴'
-        rows.append([InlineKeyboardButton(
-            f'{icon} {s["name"]} • {s["ip"]}:{s.get("port", 4370)}',
-            callback_data=f'dev:noop:{idx}',
-        )])
         rows.append([
             InlineKeyboardButton('✏️ Edit', callback_data=f'dev:edit:{idx}'),
             InlineKeyboardButton('❌ Remove', callback_data=f'dev:remove:{idx}'),
@@ -3252,7 +3247,7 @@ def _validate_device_name(name_text: str, devices: list, exclude_index: int = No
             continue
         existing = ' '.join(str(dev.get('name', '')).strip().split())
         if existing.lower() == name.lower():
-            raise ValueError(f'Device name "{name}" already exists.')
+            raise ValueError(f'Device name "{name}" conflicts with existing device "{existing}".')
     return name
 
 
@@ -3300,10 +3295,6 @@ async def callback_device(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     parts = data.split(':')
     action = parts[1] if len(parts) > 1 else ''
-
-    if action == 'noop':
-        await query.answer('Use the buttons below this device.', show_alert=False)
-        return
 
     if action == 'cancel':
         _device_state.pop(chat_id, None)
