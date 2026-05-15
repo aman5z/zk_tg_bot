@@ -45,8 +45,9 @@ def build_plain_body(report_date: date, absent: list, summary: dict) -> str:
         "-" * 42,
     ]
 
-    for dept in sorted(_by_dept(absent)):
-        names = _by_dept(absent)[dept]
+    grouped = _by_dept(absent)
+    for dept in sorted(grouped):
+        names = grouped[dept]
         lines.append(f"\n{dept} ({len(names)} absent):")
         for name in names:
             lines.append(f"  - {name}")
@@ -67,8 +68,9 @@ def build_html_body(report_date: date, absent: list, summary: dict) -> str:
     absent_cnt = summary.get('absent_count', len(absent))
 
     dept_rows_html = ""
-    for dept in sorted(_by_dept(absent)):
-        names     = _by_dept(absent)[dept]
+    grouped = _by_dept(absent)
+    for dept in sorted(grouped):
+        names     = grouped[dept]
         names_li  = "".join(f"<li>{n}</li>" for n in names)
         dept_rows_html += (
             f'<tr>'
