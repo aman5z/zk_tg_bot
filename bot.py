@@ -1255,11 +1255,12 @@ SHELL_BASE_WHITELIST = {
 }
 SHELL_ROOT_WHITELIST = SHELL_BASE_WHITELIST | {'journalctl'}
 SHELL_READ_CMDS = {'ls', 'cat', 'head', 'tail', 'wc'}
-SHELL_BLOCKED_PATH_PARTS = {'/root', '/proc', '/sys', '/dev', '/run'}
-SHELL_BLOCKED_FILE_MARKERS = {'shadow', '.ssh'}
+SHELL_BLOCKED_PATHS = {'/root', '/proc', '/sys', '/dev', '/run'}
+SHELL_BLOCKED_FILE_PATTERNS = {'shadow', '.ssh'}
+SHELL_SSH_PRIVATE_KEY_PREFIXES = ('id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa')
 SQL_SELECT_RE = re.compile(
     r'^\s*select\s+(?P<cols>[a-zA-Z0-9_,\s*]+)\s+from\s+(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)'
-    r'(?:\s+where\s+(?P<where>[a-zA-Z0-9_\'"\s=.\-]+))?'
+    r'(?:\s+where\s+(?P<where>[a-zA-Z0-9_\'"\s=]+))?'
     r'(?:\s+limit\s+(?P<limit>\d+))?\s*$',
     re.IGNORECASE
 )
@@ -1315,7 +1316,7 @@ def _is_safe_read_path(raw_path: str) -> bool:
     if '..' in raw_path:
         return False
     full = os.path.realpath(raw_path if raw_path.startswith('/') else os.path.join(SHELL_BASE_DIR, raw_path))
-    for part in SHELL_BLOCKED_PATH_PARTS:
+    for part in SHELL_BLOCKED_PATHS:
         part_full = os.path.realpath(part)
         if full == part_full or full.startswith(part_full + os.sep):
             return False
@@ -1323,11 +1324,11 @@ def _is_safe_read_path(raw_path: str) -> bool:
         return False
     parts_lower = [p.lower() for p in full.split(os.sep) if p]
     basename = os.path.basename(full).lower()
-    if any(mark in parts_lower for mark in SHELL_BLOCKED_FILE_MARKERS):
+    if any(mark in parts_lower for mark in SHELL_BLOCKED_FILE_PATTERNS):
         return False
     if basename in {'passwd', 'gshadow'}:
         return False
-    if basename.startswith('id_rsa') or basename.startswith('id_ed25519'):
+    if basename.startswith(SHELL_SSH_PRIVATE_KEY_PREFIXES):
         return False
     return True
 
@@ -1433,7 +1434,7 @@ def _execute_readonly_sql(query: str) -> tuple:
             col = cm.group(1)
             if col not in df.columns:
                 return False, f'Unknown WHERE column: {col}', None
-            val = cm.group(2) if cm.group(2) is not None else cm.group(3) if cm.group(3) is not None else cm.group(4)
+            val = next(v for v in cm.groups()[1:] if v is not None)
             df = df[df[col].astype(str) == str(val)]
 
     if cols_expr != '*':
