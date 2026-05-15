@@ -522,7 +522,7 @@ async def cmd_auditlog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
     lines = _read_audit_lines(limit=limit, day=day)
     _audit('auditlog.view', update, f'limit={limit} day={day or "-"} results={len(lines)}')
-    header = f'📜 <b>Audit Log</b> ({len(lines)} entr{"y" if len(lines)==1 else "ies"})'
+    header = f'📜 <b>Audit Log</b> ({len(lines)} entr{"y" if len(lines) == 1 else "ies"})'
     text = header + '\n\n' + '\n'.join(html.escape(ln) for ln in lines)
     for chunk in _split(text):
         await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
@@ -1279,7 +1279,7 @@ def _is_locked_out(user_id: str) -> tuple:
 
 def _register_failed_auth(user_id: str):
     st = _shell_lockouts.setdefault(user_id, {'failed': 0, 'locked_until': None})
-    st['failed'] = int(st.get('failed', 0)) + 1
+    st['failed'] = st.get('failed', 0) + 1
     if st['failed'] >= SHELL_MAX_FAILED_ATTEMPTS:
         st['locked_until'] = datetime.now() + timedelta(minutes=SHELL_LOCKOUT_MINUTES)
         st['failed'] = 0
@@ -1310,8 +1310,8 @@ def _is_safe_read_path(raw_path: str) -> bool:
     for part in SHELL_BLOCKED_PATH_PARTS:
         if full == part or full.startswith(part + os.sep):
             return False
-    lowered = full.lower()
-    if any(mark in lowered for mark in SHELL_BLOCKED_FILE_MARKERS):
+    full_path_lower = full.lower()
+    if any(mark in full_path_lower for mark in SHELL_BLOCKED_FILE_MARKERS):
         return False
     return True
 
@@ -2349,7 +2349,7 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         ok, output = _run_safe_shell_command(text, elevated=bool(sess.get('elevated')))
         sess['expires_at'] = datetime.now() + timedelta(minutes=SHELL_SESSION_TIMEOUT_MINUTES)
-        _audit('shell.cmd', update, f'ok={ok} elevated={int(bool(sess.get("elevated")))} cmd={text[:120]}')
+        _audit('shell.cmd', update, f'ok={ok} elevated={bool(sess.get("elevated", False))} cmd={text[:120]}')
         status = '✅' if ok else '❌'
         await update.message.reply_text(
             f'{status} <code>{html.escape(output)}</code>',
