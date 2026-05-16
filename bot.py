@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
@@ -86,6 +87,7 @@ _shell_sessions: dict = {}      # chat_id -> active shell session
 _shell_lockouts: dict = {}      # user_id -> lockout metadata
 _sql_prompt_state: dict = {}    # chat_id -> pending sql input metadata
 _device_state: dict = {}        # chat_id -> pending /device prompt state
+_bk_state: dict = {}            # chat_id -> pending /dbbackup prompt state
 
 _audit_logger = logging.getLogger('ZKBot.Audit')
 if not _audit_logger.handlers:
@@ -2641,6 +2643,159 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
+    # ── Backup prompt states ──────────────────────────────────────────────────
+    bk = _bk_state.get(chat_id)
+    if bk and bk.get('awaiting'):
+        awaiting_bk = bk['awaiting']
+
+        if awaiting_bk in ('bk_copy_dir', 'bk_copy_dir_now'):
+            if text.lower() in ('none', 'clear', '—'):
+                settings.set_backup_copy_dir('')
+                bk['awaiting'] = None
+                _audit('dbbackup.copydir.clear', update)
+                await update.message.reply_text(
+                    '✅ Backup copy directory cleared.',
+                    parse_mode=ParseMode.HTML)
+            else:
+                settings.set_backup_copy_dir(text)
+                _audit('dbbackup.copydir.set', update, f'dir={text}')
+                if awaiting_bk == 'bk_copy_dir_now':
+                    # Perform the copy immediately after setting dir
+                    local_path, _, accessible = _get_mdb_size_info()
+                    if not accessible:
+                        bk['awaiting'] = None
+                        await update.message.reply_text('❌ MDB is not accessible. Check /mdbinfo.')
+                        return
+                    stamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    filename = f"mdb_backup_{stamp}.mdb"
+                    try:
+                        os.makedirs(text, exist_ok=True)
+                        dest = os.path.join(text, filename)
+                        shutil.copy2(local_path, dest)
+                        _audit('dbbackup.copy', update, f'dest={dest}')
+                        await update.message.reply_text(
+                            f'✅ Directory saved and MDB copied to:\n<code>{dest}</code>',
+                            parse_mode=ParseMode.HTML)
+                    except OSError as e:
+                        _audit('dbbackup.copy.error', update, str(e))
+                        await update.message.reply_text(f'❌ Copy failed: {e}')
+                else:
+                    await update.message.reply_text(
+                        f'✅ Backup copy directory set to:\n<code>{text}</code>',
+                        parse_mode=ParseMode.HTML)
+                bk['awaiting'] = None
+            return
+
+        if awaiting_bk == 'bk_time':
+            try:
+                parts = text.split(':')
+                if len(parts) != 2:
+                    raise ValueError('wrong format')
+                hh, mm = parts[0].strip(), parts[1].strip()
+                if not hh.isdigit() or not mm.isdigit():
+                    raise ValueError('non-numeric')
+                h, m = int(hh), int(mm)
+                if not (0 <= h <= 23 and 0 <= m <= 59):
+                    raise ValueError('out of range')
+                settings.set_backup_hour(h)
+                settings.set_backup_minute(m)
+                bk['awaiting'] = None
+                _audit('dbbackup.sched.time', update, f'time={h:02d}:{m:02d}')
+                await update.message.reply_text(
+                    f'✅ Backup schedule time set to <b>{h:02d}:{m:02d}</b>\n'
+                    'Use /dbbackup → ⚙️ Schedule Settings to review.',
+                    parse_mode=ParseMode.HTML)
+            except ValueError:
+                await update.message.reply_text(
+                    '❌ Invalid format. Please send time as <code>HH:MM</code> '
+                    '(24 h, zero-padded), e.g. <code>07:00</code>.',
+                    parse_mode=ParseMode.HTML)
+            return
+
+        if awaiting_bk == 'bk_sender':
+            if text.lower() in ('none', 'clear', '—'):
+                settings.set_backup_sender_email('')
+                bk['awaiting'] = None
+                _audit('dbbackup.mail.sender.clear', update)
+                await update.message.reply_text(
+                    '✅ Backup sender email cleared — smtp fallback will be used.',
+                    parse_mode=ParseMode.HTML)
+            elif '@' not in text or '.' not in text.split('@')[-1]:
+                await update.message.reply_text(
+                    '❌ That does not look like a valid email address. Please try again.',
+                    parse_mode=ParseMode.HTML)
+                return
+            else:
+                settings.set_backup_sender_email(text)
+                bk['awaiting'] = None
+                _audit('dbbackup.mail.sender', update, f'email={text}')
+                await update.message.reply_text(
+                    f'✅ Backup sender email set to <code>{text}</code>',
+                    parse_mode=ParseMode.HTML)
+            return
+
+        if awaiting_bk == 'bk_name':
+            if text.lower() in ('none', 'clear', '—'):
+                settings.set_backup_sender_name('')
+                bk['awaiting'] = None
+                _audit('dbbackup.mail.name.clear', update)
+                await update.message.reply_text(
+                    '✅ Backup sender name cleared — smtp fallback will be used.',
+                    parse_mode=ParseMode.HTML)
+            else:
+                settings.set_backup_sender_name(text)
+                bk['awaiting'] = None
+                _audit('dbbackup.mail.name', update, f'name={text}')
+                await update.message.reply_text(
+                    f'✅ Backup sender name set to <b>{text}</b>',
+                    parse_mode=ParseMode.HTML)
+            return
+
+        if awaiting_bk == 'bk_pass':
+            if text.lower() in ('none', 'clear', '—'):
+                settings.set_backup_app_password('')
+                bk['awaiting'] = None
+                _audit('dbbackup.mail.pass.clear', update)
+                await update.message.reply_text(
+                    '✅ Backup app password cleared — smtp fallback will be used.',
+                    parse_mode=ParseMode.HTML)
+            elif len(text) < 8:
+                await update.message.reply_text(
+                    '❌ App Password seems too short. Gmail App Passwords are 16 characters. '
+                    'Please try again.', parse_mode=ParseMode.HTML)
+                return
+            else:
+                settings.set_backup_app_password(text)
+                bk['awaiting'] = None
+                _audit('dbbackup.mail.pass.set', update)
+                await update.message.reply_text(
+                    '✅ Backup app password saved.',
+                    parse_mode=ParseMode.HTML)
+            return
+
+        if awaiting_bk == 'bk_add_recip':
+            if '@' not in text or '.' not in text.split('@')[-1]:
+                await update.message.reply_text(
+                    '❌ That does not look like a valid email address. Please try again.',
+                    parse_mode=ParseMode.HTML)
+                return
+            recipients = settings.get_backup_recipients_raw()
+            if text in recipients:
+                bk['awaiting'] = None
+                await update.message.reply_text(
+                    f'ℹ️ <code>{text}</code> is already in the backup recipients list.',
+                    parse_mode=ParseMode.HTML)
+                return
+            recipients.append(text)
+            settings.set_backup_recipients(recipients)
+            bk['awaiting'] = None
+            _audit('dbbackup.mail.recip.add', update, f'email={text}')
+            await update.message.reply_text(
+                f'✅ Added <code>{text}</code> to backup recipients.\n'
+                f'Total: {len(recipients)}',
+                parse_mode=ParseMode.HTML)
+            return
+
     st = _edit_state.get(chat_id)
     if not st or not st.get('awaiting'):
         return  # nothing awaiting — ignore
@@ -3715,27 +3870,565 @@ async def cmd_download(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
 
-async def cmd_dbbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Create/send read-only copy of the MDB file."""
-    if not _allowed(update):
-        return await _deny(update)
-    await update.message.reply_text('⏳ Preparing read-only MDB copy...')
+# ── /dbbackup helpers ─────────────────────────────────────────────────────────
+
+_TG_MAX_DOC_BYTES = 49 * 1024 * 1024   # 49 MB safe Telegram document limit
+
+_BACKUP_METHOD_LABELS = {
+    'tg':   '📱 Telegram',
+    'mail': '📧 Mail',
+    'copy': '📁 Copy',
+    'mc':   '📧📁 Mail + Copy',
+    'tm':   '📱📧 Telegram + Mail',
+    'tc':   '📱📁 Telegram + Copy',
+    'all':  '🔀 All (Telegram + Mail + Copy)',
+}
+
+_BACKUP_FREQ_LABELS = {
+    'daily':  'Daily',
+    'weekly': 'Weekly (configured days)',
+}
+
+
+def _backup_method_label(method: str) -> str:
+    return _BACKUP_METHOD_LABELS.get(method, method.upper())
+
+
+def _get_mdb_size_info() -> tuple:
+    """Return (local_path, size_bytes, accessible). Never raises."""
     try:
         info = mdb_reader.get_mdb_info()
-        local_path = info.get('local_path')
-        if not info.get('accessible') or not local_path or not os.path.isfile(local_path):
-            await update.message.reply_text('❌ MDB is not accessible. Check /mdbinfo.')
+        local_path = info.get('local_path', '')
+        accessible = bool(info.get('accessible') and local_path and os.path.isfile(local_path))
+        size_bytes = os.path.getsize(local_path) if accessible else 0
+        return local_path, size_bytes, accessible
+    except Exception:
+        return '', 0, False
+
+
+def _fmt_backup_panel() -> tuple:
+    """Return (text, InlineKeyboardMarkup) for the /dbbackup main panel."""
+    local_path, size_bytes, accessible = _get_mdb_size_info()
+    fname    = os.path.basename(local_path) if local_path else '—'
+    size_str = f"{size_bytes / (1024 * 1024):.1f} MB" if accessible else '—'
+    tg_ok    = accessible and size_bytes <= _TG_MAX_DOC_BYTES
+
+    sched_on  = settings.get_backup_enabled()
+    sched_ico = '🟢' if sched_on else '🔴'
+    method    = _backup_method_label(settings.get_backup_method())
+
+    text = (
+        f"📦 <b>MDB Backup</b>\n\n"
+        f"📄 File: <code>{fname}</code>\n"
+        f"💾 Size: <b>{size_str}</b>\n"
+        f"{'✅ Accessible' if accessible else '❌ Not accessible'}\n\n"
+        f"{sched_ico} Schedule: <b>{'ENABLED' if sched_on else 'DISABLED'}</b>"
+        f"  ({settings.get_backup_schedule().title()} at {settings.backup_time_label()})\n"
+        f"📬 Method: <b>{method}</b>"
+    )
+
+    rows: list = []
+    if tg_ok:
+        rows.append([InlineKeyboardButton('📱 Telegram Download', callback_data='bk:dl')])
+    elif accessible and not tg_ok:
+        text += f'\n\n⚠️ File too large for Telegram ({size_bytes / (1024 * 1024):.1f} MB > 49 MB). Use Mail or Copy.'
+    rows.append([
+        InlineKeyboardButton('📧 Mail Backup',   callback_data='bk:mail'),
+        InlineKeyboardButton('📁 Copy to Dir',   callback_data='bk:copy'),
+    ])
+    rows.append([InlineKeyboardButton('⚙️ Schedule Settings', callback_data='bk:sched')])
+    rows.append([InlineKeyboardButton('✅ Done',               callback_data='bk:done')])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _fmt_backup_sched_panel() -> tuple:
+    """Return (text, kb) for the backup schedule settings sub-panel."""
+    on       = settings.get_backup_enabled()
+    sched    = settings.get_backup_schedule()
+    freq_lbl = _BACKUP_FREQ_LABELS.get(sched, sched.title())
+    method   = _backup_method_label(settings.get_backup_method())
+    copy_dir = settings.get_backup_copy_dir() or '—'
+    ico      = '🟢' if on else '🔴'
+
+    text = (
+        f"⚙️ <b>Backup Schedule Settings</b>\n\n"
+        f"{ico} Schedule: <b>{'ENABLED' if on else 'DISABLED'}</b>\n"
+        f"🔄 Frequency: <b>{freq_lbl}</b>\n"
+        f"🕐 Time: <b>{settings.backup_time_label()}</b>\n"
+        f"📅 Days: <b>{settings.backup_days_label()}</b>\n"
+        f"📬 Method: <b>{method}</b>\n"
+        f"📁 Copy Dir: <code>{copy_dir}</code>"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f'{ico} {"On" if on else "Off"}', callback_data='bk:stoggle'),
+            InlineKeyboardButton('🔄 Frequency',                   callback_data='bk:sfreq'),
+        ],
+        [
+            InlineKeyboardButton('🕐 Time',      callback_data='bk:stime'),
+            InlineKeyboardButton('📅 Days',      callback_data='bk:sdays'),
+        ],
+        [
+            InlineKeyboardButton('📬 Method',    callback_data='bk:smeth'),
+            InlineKeyboardButton('📁 Copy Dir',  callback_data='bk:scopy'),
+        ],
+        [InlineKeyboardButton('📧 Backup Mail Settings', callback_data='bk:bkmail')],
+        [
+            InlineKeyboardButton('← Back',       callback_data='bk:sback'),
+            InlineKeyboardButton('✅ Done',       callback_data='bk:sdone'),
+        ],
+    ])
+    return text, kb
+
+
+def _fmt_backup_mail_panel() -> tuple:
+    """Return (text, kb) for backup-specific mail settings."""
+    sender_raw = settings.get_backup_sender_email_raw()
+    sender_disp = sender_raw or f'(smtp fallback: {settings.get_smtp_sender_email() or "—"})'
+    name_raw    = settings.get_backup_sender_name_raw()
+    name_disp   = name_raw or f'(smtp fallback: {settings.get_smtp_sender_name() or "—"})'
+    pass_raw    = settings.get_backup_app_password_raw()
+    if pass_raw:
+        pass_disp = '✅ Set (backup-specific)'
+    elif settings.get_smtp_app_password():
+        pass_disp = '(smtp fallback: ✅ Set)'
+    else:
+        pass_disp = '❌ Not set'
+    recip_raw = settings.get_backup_recipients_raw()
+    if recip_raw:
+        recip_disp = f'{len(recip_raw)} custom address(es)'
+    else:
+        n = len(settings.get_smtp_recipients())
+        recip_disp = f'(smtp fallback: {n} address(es))'
+
+    text = (
+        f"📧 <b>Backup Mail Settings</b>\n\n"
+        f"<i>Leave fields blank to fall back to [smtp] report-mail settings.</i>\n\n"
+        f"📤 Sender: <code>{sender_disp}</code>\n"
+        f"👤 Name: <b>{name_disp}</b>\n"
+        f"🔑 Password: <b>{pass_disp}</b>\n"
+        f"👥 Recipients: <b>{recip_disp}</b>"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('📤 Sender',     callback_data='bk:msender'),
+            InlineKeyboardButton('👤 Name',        callback_data='bk:mname'),
+        ],
+        [
+            InlineKeyboardButton('🔑 Password',   callback_data='bk:mpass'),
+            InlineKeyboardButton('👥 Recipients', callback_data='bk:mrecip'),
+        ],
+        [InlineKeyboardButton('← Back', callback_data='bk:mback')],
+    ])
+    return text, kb
+
+
+def _backup_recipients_menu_kb() -> InlineKeyboardMarkup:
+    recipients = settings.get_backup_recipients_raw()
+    rows = []
+    for i, addr in enumerate(recipients):
+        rows.append([InlineKeyboardButton(f'❌ {addr}', callback_data=f'bk:mrm:{i}')])
+    rows.append([InlineKeyboardButton('➕ Add Recipient', callback_data='bk:madd')])
+    rows.append([InlineKeyboardButton('← Back', callback_data='bk:mback')])
+    return InlineKeyboardMarkup(rows)
+
+
+def _backup_recipients_text() -> str:
+    recipients = settings.get_backup_recipients_raw()
+    if not recipients:
+        smtp_n = len(settings.get_smtp_recipients())
+        return (
+            f'👥 <b>Backup Recipients</b>\n\n'
+            f'No custom recipients — using smtp fallback ({smtp_n} address(es)).\n\n'
+            'Add a custom address to override:'
+        )
+    addr_list = '\n'.join(f'  {i + 1}. {r}' for i, r in enumerate(recipients))
+    return (
+        f'👥 <b>Backup Recipients ({len(recipients)})</b>\n\n{addr_list}\n\n'
+        'Tap ❌ to remove, or add a new address:'
+    )
+
+
+def _backup_freq_menu_kb() -> InlineKeyboardMarkup:
+    current = settings.get_backup_schedule()
+    rows = []
+    for val, label in _BACKUP_FREQ_LABELS.items():
+        checked = val == current
+        rows.append([InlineKeyboardButton(
+            f"{'✅' if checked else '⬜'} {label}",
+            callback_data=f'bk:sfr:{val}',
+        )])
+    rows.append([InlineKeyboardButton('← Back', callback_data='bk:sback')])
+    return InlineKeyboardMarkup(rows)
+
+
+def _backup_method_menu_kb() -> InlineKeyboardMarkup:
+    current = settings.get_backup_method()
+    rows = []
+    for val, label in _BACKUP_METHOD_LABELS.items():
+        checked = val == current
+        rows.append([InlineKeyboardButton(
+            f"{'✅' if checked else '⬜'} {label}",
+            callback_data=f'bk:smeth:{val}',
+        )])
+    rows.append([InlineKeyboardButton('← Back', callback_data='bk:sback')])
+    return InlineKeyboardMarkup(rows)
+
+
+def _backup_days_menu_kb() -> InlineKeyboardMarkup:
+    current = settings.get_backup_days()
+    selected = {int(d.strip()) for d in current.split(',') if d.strip().isdigit()}
+    btns = []
+    for day_num, day_name in _DAY_NAMES.items():
+        checked = day_num in selected
+        btns.append(InlineKeyboardButton(
+            f"{'✅' if checked else '⬜'} {day_name}",
+            callback_data=f'bk:sday:{day_num}',
+        ))
+    rows = [btns[i:i + 3] for i in range(0, len(btns), 3)]
+    rows.append([InlineKeyboardButton('← Back', callback_data='bk:sback')])
+    return InlineKeyboardMarkup(rows)
+
+
+# ── /dbbackup command ─────────────────────────────────────────────────────────
+
+async def cmd_dbbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """MDB Backup panel — inline keyboard with action choices."""
+    if not _allowed(update):
+        return await _deny(update)
+    _audit('dbbackup.open', update)
+    text, kb = _fmt_backup_panel()
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+# ── /dbbackup callback handler ────────────────────────────────────────────────
+
+async def callback_dbbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle all inline keyboard callbacks for /dbbackup (prefix 'bk:')."""
+    query   = update.callback_query
+    await query.answer()
+    if not _allowed(update):
+        return
+    data    = query.data or ''
+    chat_id = str(update.effective_chat.id)
+    action  = data[3:]   # strip 'bk:'
+
+    # ── Main panel ────────────────────────────────────────────────────────────
+
+    if action == 'done':
+        _bk_state.pop(chat_id, None)
+        await query.edit_message_text('✅ Backup panel closed.')
+        return
+
+    if action == 'back':
+        _bk_state.pop(chat_id, None)
+        text, kb = _fmt_backup_panel()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if action == 'dl':
+        local_path, size_bytes, accessible = _get_mdb_size_info()
+        if not accessible:
+            await query.edit_message_text('❌ MDB is not accessible. Check /mdbinfo.')
             return
-        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"mdb_backup_{stamp}.mdb"
-        with open(local_path, 'rb') as fh:
-            await update.message.reply_document(
-                document=fh,
-                filename=filename,
-                caption='📦 Read-only MDB copy. No database writes performed.'
+        if size_bytes > _TG_MAX_DOC_BYTES:
+            await query.edit_message_text(
+                f'❌ File is {size_bytes / (1024 * 1024):.1f} MB — too large for Telegram.\n'
+                'Use 📧 Mail or 📁 Copy instead.'
             )
-    except Exception as e:
-        await update.message.reply_text(f'❌ {e}')
+            return
+        await query.edit_message_text('⏳ Sending MDB to Telegram…')
+        try:
+            stamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"mdb_backup_{stamp}.mdb"
+            with open(local_path, 'rb') as fh:
+                data_buf = BytesIO(fh.read())
+            data_buf.seek(0)
+            await query.message.reply_document(
+                document=data_buf,
+                filename=filename,
+                caption='📦 MDB backup (manual Telegram download)',
+            )
+            _audit('dbbackup.tg', update, f'file={filename} size={size_bytes}')
+            await query.edit_message_text(f'✅ MDB sent as <code>{filename}</code>.', parse_mode=ParseMode.HTML)
+        except Exception as e:
+            _audit('dbbackup.tg.error', update, str(e))
+            await query.edit_message_text(f'❌ Telegram send failed: {e}')
+        return
+
+    if action == 'mail':
+        local_path, size_bytes, accessible = _get_mdb_size_info()
+        if not accessible:
+            await query.edit_message_text('❌ MDB is not accessible. Check /mdbinfo.')
+            return
+        missing = []
+        if not settings.get_backup_sender_email():
+            missing.append('sender email')
+        if not settings.get_backup_app_password():
+            missing.append('app password')
+        if not settings.get_backup_recipients():
+            missing.append('recipients')
+        if missing:
+            await query.edit_message_text(
+                f'❌ Backup mail not fully configured. Missing: {", ".join(missing)}.\n'
+                'Use ⚙️ Schedule Settings → 📧 Backup Mail Settings to configure.'
+            )
+            return
+        await query.edit_message_text('⏳ Mailing MDB backup…')
+        stamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"mdb_backup_{stamp}.mdb"
+        ok, err  = email_sender.send_backup_email(
+            sender_email=settings.get_backup_sender_email(),
+            sender_name=settings.get_backup_sender_name(),
+            app_password=settings.get_backup_app_password(),
+            recipients=settings.get_backup_recipients(),
+            mdb_path=local_path,
+            filename=filename,
+        )
+        n = len(settings.get_backup_recipients())
+        if ok:
+            _audit('dbbackup.mail', update, f'file={filename} recipients={n}')
+            await query.edit_message_text(
+                f'✅ MDB backup mailed to {n} recipient(s).\n'
+                f'File: <code>{filename}</code>', parse_mode=ParseMode.HTML
+            )
+        else:
+            _audit('dbbackup.mail.error', update, err[:200])
+            await query.edit_message_text(f'❌ Mail failed: {err}')
+        return
+
+    if action == 'copy':
+        copy_dir = settings.get_backup_copy_dir()
+        if not copy_dir:
+            # Ask for path
+            _bk_state[chat_id] = {'awaiting': 'bk_copy_dir_now'}
+            await query.edit_message_text(
+                '📁 <b>Copy MDB to Directory</b>\n\n'
+                'No copy directory is configured yet.\n\n'
+                'Reply with the full destination path.\n'
+                'Example: <code>/mnt/backups/mdb</code>\n\n'
+                'This will also save the path for future copies and scheduled backups.',
+                parse_mode=ParseMode.HTML
+            )
+            return
+        # Copy immediately
+        local_path, _, accessible = _get_mdb_size_info()
+        if not accessible:
+            await query.edit_message_text('❌ MDB is not accessible. Check /mdbinfo.')
+            return
+        await query.edit_message_text('⏳ Copying MDB…')
+        stamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"mdb_backup_{stamp}.mdb"
+        try:
+            os.makedirs(copy_dir, exist_ok=True)
+            dest = os.path.join(copy_dir, filename)
+            shutil.copy2(local_path, dest)
+            _audit('dbbackup.copy', update, f'dest={dest}')
+            await query.edit_message_text(
+                f'✅ MDB copied to:\n<code>{dest}</code>', parse_mode=ParseMode.HTML
+            )
+        except OSError as e:
+            _audit('dbbackup.copy.error', update, str(e))
+            await query.edit_message_text(f'❌ Copy failed: {e}')
+        return
+
+    # ── Schedule settings sub-panel ───────────────────────────────────────────
+
+    if action == 'sched':
+        text, kb = _fmt_backup_sched_panel()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if action == 'sback':
+        text, kb = _fmt_backup_sched_panel()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if action == 'sdone':
+        _bk_state.pop(chat_id, None)
+        await query.edit_message_text('✅ Backup schedule settings saved.')
+        return
+
+    if action == 'stoggle':
+        settings.set_backup_enabled(not settings.get_backup_enabled())
+        _audit('dbbackup.sched.toggle', update,
+               f'enabled={settings.get_backup_enabled()}')
+        text, kb = _fmt_backup_sched_panel()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if action == 'sfreq':
+        await query.edit_message_text(
+            '🔄 <b>Select Backup Frequency</b>',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_backup_freq_menu_kb(),
+        )
+        return
+
+    if action.startswith('sfr:'):
+        val = action[4:].strip().lower()
+        if val in _BACKUP_FREQ_LABELS:
+            settings.set_backup_schedule(val)
+            _audit('dbbackup.sched.freq', update, f'freq={val}')
+        text, kb = _fmt_backup_sched_panel()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if action == 'stime':
+        _bk_state[chat_id] = {'awaiting': 'bk_time'}
+        current = settings.backup_time_label()
+        await query.edit_message_text(
+            '🕐 <b>Set Backup Schedule Time</b>\n\n'
+            f'Current: <b>{current}</b>\n\n'
+            'Reply with the time in <b>HH:MM</b> format (24 h, zero-padded).\n'
+            'Example: <code>07:00</code>',
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action == 'sdays':
+        await query.edit_message_text(
+            '📅 <b>Select Backup Days</b>\n(tap to toggle; used for weekly schedule)',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_backup_days_menu_kb(),
+        )
+        return
+
+    if action.startswith('sday:'):
+        try:
+            day_num = int(action[5:])
+        except ValueError:
+            return
+        current = settings.get_backup_days()
+        sel = {int(d.strip()) for d in current.split(',') if d.strip().isdigit()}
+        if day_num in sel:
+            sel.discard(day_num)
+        else:
+            sel.add(day_num)
+        settings.set_backup_days(','.join(str(d) for d in sorted(sel)) if sel else '0')
+        _audit('dbbackup.sched.days', update, f'days={settings.get_backup_days()}')
+        await query.edit_message_reply_markup(reply_markup=_backup_days_menu_kb())
+        return
+
+    if action == 'smeth':
+        await query.edit_message_text(
+            '📬 <b>Select Backup Delivery Method</b>',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_backup_method_menu_kb(),
+        )
+        return
+
+    if action.startswith('smeth:'):
+        val = action[6:].strip().lower()
+        if val in _BACKUP_METHOD_LABELS:
+            settings.set_backup_method(val)
+            _audit('dbbackup.sched.method', update, f'method={val}')
+        text, kb = _fmt_backup_sched_panel()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if action == 'scopy':
+        _bk_state[chat_id] = {'awaiting': 'bk_copy_dir'}
+        current_dir = settings.get_backup_copy_dir() or '—'
+        await query.edit_message_text(
+            '📁 <b>Set Backup Copy Directory</b>\n\n'
+            f'Current: <code>{current_dir}</code>\n\n'
+            'Reply with the full destination path.\n'
+            'Example: <code>/mnt/backups/mdb</code>\n'
+            'Send <code>none</code> to clear.',
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # ── Backup mail settings sub-panel ────────────────────────────────────────
+
+    if action == 'bkmail':
+        text, kb = _fmt_backup_mail_panel()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if action == 'mback':
+        text, kb = _fmt_backup_sched_panel()
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if action == 'msender':
+        _bk_state[chat_id] = {'awaiting': 'bk_sender'}
+        raw     = settings.get_backup_sender_email_raw()
+        current = raw or f'(smtp fallback: {settings.get_smtp_sender_email() or "—"})'
+        await query.edit_message_text(
+            '📤 <b>Set Backup Sender Email</b>\n\n'
+            f'Current: <code>{current}</code>\n\n'
+            'Reply with your Gmail address.\n'
+            'Send <code>none</code> to clear (use smtp fallback).',
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action == 'mname':
+        _bk_state[chat_id] = {'awaiting': 'bk_name'}
+        raw     = settings.get_backup_sender_name_raw()
+        current = raw or f'(smtp fallback: {settings.get_smtp_sender_name() or "—"})'
+        await query.edit_message_text(
+            '👤 <b>Set Backup Sender Name</b>\n\n'
+            f'Current: <b>{current}</b>\n\n'
+            'Reply with the display name for the From: header.\n'
+            'Send <code>none</code> to clear (use smtp fallback).',
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action == 'mpass':
+        _bk_state[chat_id] = {'awaiting': 'bk_pass'}
+        raw     = settings.get_backup_app_password_raw()
+        set_str = '✅ Set (backup-specific)' if raw else '(smtp fallback)'
+        await query.edit_message_text(
+            '🔑 <b>Set Backup App Password</b>\n\n'
+            f'Status: <b>{set_str}</b>\n\n'
+            'Reply with your Gmail App Password (16 chars, no spaces).\n'
+            'Get one at: Google Account → Security → App Passwords.\n'
+            'Send <code>none</code> to clear (use smtp fallback).\n\n'
+            '⚠️ Stored in config.ini — do not share that file.',
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action == 'mrecip':
+        await query.edit_message_text(
+            _backup_recipients_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_backup_recipients_menu_kb(),
+        )
+        return
+
+    if action == 'madd':
+        _bk_state[chat_id] = {'awaiting': 'bk_add_recip'}
+        await query.edit_message_text(
+            '➕ <b>Add Backup Recipient</b>\n\n'
+            'Reply with the email address to add.\n'
+            'Example: <code>itsupport@school.ae</code>',
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action.startswith('mrm:'):
+        try:
+            idx = int(action[4:])
+        except (ValueError, IndexError):
+            return
+        recipients = settings.get_backup_recipients_raw()
+        if 0 <= idx < len(recipients):
+            removed = recipients.pop(idx)
+            settings.set_backup_recipients(recipients)
+            _audit('dbbackup.mail.recip.rm', update, f'removed={removed}')
+            await query.edit_message_text(
+                _backup_recipients_text() + f'\n\n✅ Removed: <code>{removed}</code>',
+                parse_mode=ParseMode.HTML,
+                reply_markup=_backup_recipients_menu_kb(),
+            )
+        return
+
+
 
 async def cmd_importcsv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Read-only CSV preview/validation workflow."""
@@ -4007,6 +4700,7 @@ def main():
                                          pattern=r'^(er:|ed:|ee:)'))
     app.add_handler(CallbackQueryHandler(callback_admin, pattern=r'^adm:'))
     app.add_handler(CallbackQueryHandler(callback_device, pattern=r'^dev:'))
+    app.add_handler(CallbackQueryHandler(callback_dbbackup, pattern=r'^bk:'))
     app.add_handler(CallbackQueryHandler(callback_calendar))
 
     # Text input handler (for edit panel awaiting states)

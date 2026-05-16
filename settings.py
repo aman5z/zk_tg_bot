@@ -347,3 +347,149 @@ def set_smtp_format(val: str):
     _ensure('smtp')
     _cfg['smtp']['format'] = val.strip().lower()
     _save()
+
+
+# ─── DB Backup settings ───────────────────────────────────────────────────────
+
+def get_backup_enabled() -> bool:
+    """Master switch for scheduled backups."""
+    return _cfg.getboolean('dbbackup', 'schedule_enabled', fallback=False)
+
+
+def set_backup_enabled(val: bool):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['schedule_enabled'] = '1' if val else '0'
+    _save()
+
+
+def get_backup_schedule() -> str:
+    """'daily' | 'weekly'"""
+    return _cfg.get('dbbackup', 'schedule', fallback='daily').strip().lower()
+
+
+def set_backup_schedule(val: str):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['schedule'] = val.strip().lower()
+    _save()
+
+
+def get_backup_hour() -> int:
+    return _cfg.getint('dbbackup', 'schedule_hour', fallback=7)
+
+
+def set_backup_hour(val: int):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['schedule_hour'] = str(val)
+    _save()
+
+
+def get_backup_minute() -> int:
+    return _cfg.getint('dbbackup', 'schedule_minute', fallback=0)
+
+
+def set_backup_minute(val: int):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['schedule_minute'] = str(val)
+    _save()
+
+
+def get_backup_days() -> str:
+    """Comma-separated day numbers: 0=Mon…6=Sun."""
+    return _cfg.get('dbbackup', 'schedule_days', fallback='0,1,2,3,6')
+
+
+def set_backup_days(val: str):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['schedule_days'] = val
+    _save()
+
+
+def get_backup_method() -> str:
+    """'tg' | 'mail' | 'copy' | 'mc' | 'tm' | 'tc' | 'all'"""
+    return _cfg.get('dbbackup', 'method', fallback='tg').strip().lower()
+
+
+def set_backup_method(val: str):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['method'] = val.strip().lower()
+    _save()
+
+
+def get_backup_copy_dir() -> str:
+    return _cfg.get('dbbackup', 'copy_dir', fallback='').strip()
+
+
+def set_backup_copy_dir(val: str):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['copy_dir'] = val.strip()
+    _save()
+
+
+def get_backup_recipients_raw() -> list:
+    """Backup-specific recipients. Empty list means fall back to smtp recipients."""
+    raw = _cfg.get('dbbackup', 'recipients', fallback='').strip()
+    return [r.strip() for r in raw.split(',') if r.strip()]
+
+
+def set_backup_recipients(recipients: list):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['recipients'] = ','.join(recipients)
+    _save()
+
+
+def get_backup_recipients() -> list:
+    """Effective backup recipients — backup-specific list or smtp fallback."""
+    raw = get_backup_recipients_raw()
+    return raw if raw else get_smtp_recipients()
+
+
+def get_backup_sender_email_raw() -> str:
+    """Backup-specific sender email; empty = fall back to smtp."""
+    return _cfg.get('dbbackup', 'sender_email', fallback='').strip()
+
+
+def set_backup_sender_email(val: str):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['sender_email'] = val.strip()
+    _save()
+
+
+def get_backup_sender_email() -> str:
+    return get_backup_sender_email_raw() or get_smtp_sender_email()
+
+
+def get_backup_sender_name_raw() -> str:
+    return _cfg.get('dbbackup', 'sender_name', fallback='').strip()
+
+
+def set_backup_sender_name(val: str):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['sender_name'] = val.strip()
+    _save()
+
+
+def get_backup_sender_name() -> str:
+    return get_backup_sender_name_raw() or get_smtp_sender_name()
+
+
+def get_backup_app_password_raw() -> str:
+    return _cfg.get('dbbackup', 'app_password', fallback='').strip()
+
+
+def set_backup_app_password(val: str):
+    _ensure('dbbackup')
+    _cfg['dbbackup']['app_password'] = val.strip()
+    _save()
+
+
+def get_backup_app_password() -> str:
+    return get_backup_app_password_raw() or get_smtp_app_password()
+
+
+def backup_time_label() -> str:
+    return f"{get_backup_hour():02d}:{get_backup_minute():02d}"
+
+
+def backup_days_label() -> str:
+    days = [d.strip() for d in get_backup_days().split(',') if d.strip()]
+    return ', '.join(_DAY_NAMES.get(int(d), d) for d in days) or '—'

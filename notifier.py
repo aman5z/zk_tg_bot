@@ -4,11 +4,13 @@ Scheduled Telegram notifications:
 - Daily absent report at configured time
 - Device status changes
 - Live punch notifications (optional, toggle with /livepunches)
+- Scheduled MDB backup (optional, toggle with /dbbackup → Schedule Settings)
 """
 
 import asyncio
 import logging
 import os
+import shutil
 import time
 from datetime import datetime, date
 from io import BytesIO
@@ -233,6 +235,99 @@ async def check_live_punches(bot: Bot):
         logger.error(f"Live punch check error: {e}")
 
 
+# ─── Scheduled MDB backup ─────────────────────────────────────────────────────
+
+_TG_MAX_DOC_BYTES = 49 * 1024 * 1024   # 49 MB — same limit as bot.py
+
+
+async def send_scheduled_backup(bot: Bot, triggered_by: str = 'scheduler'):
+    """
+    Perform an MDB backup according to the configured delivery method.
+    Supports: telegram, mail, copy, or any combination.
+    Logs a summary to Telegram chat and to the Python logger.
+    """
+    try:
+        info       = mdb_reader.get_mdb_info()
+        local_path = info.get('local_path', '')
+        if not info.get('accessible') or not local_path or not os.path.isfile(local_path):
+            await _send(bot, f'⚠️ Backup ({triggered_by}): MDB is not accessible.')
+            return
+
+        stamp      = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename   = f"mdb_backup_{stamp}.mdb"
+        method     = settings.get_backup_method()
+        size_bytes = os.path.getsize(local_path)
+        results: list = []
+
+        do_tg   = method in ('tg', 'tm', 'tc', 'all')
+        do_mail = method in ('mail', 'mc', 'tm', 'all')
+        do_copy = method in ('copy', 'mc', 'tc', 'all')
+
+        # ── Telegram delivery ──
+        if do_tg:
+            if size_bytes > _TG_MAX_DOC_BYTES:
+                results.append(
+                    f'⚠️ Telegram skipped — {size_bytes / (1024 * 1024):.1f} MB > 49 MB limit'
+                )
+            else:
+                try:
+                    with open(local_path, 'rb') as fh:
+                        buf = BytesIO(fh.read())
+                    await _send_doc(
+                        bot, buf, filename,
+                        caption=f'📦 Scheduled MDB backup ({triggered_by})',
+                    )
+                    results.append('✅ Sent via Telegram')
+                except Exception as e:
+                    results.append(f'❌ Telegram failed: {e}')
+
+        # ── Email delivery ──
+        if do_mail:
+            try:
+                ok, err = email_sender.send_backup_email(
+                    sender_email=settings.get_backup_sender_email(),
+                    sender_name=settings.get_backup_sender_name(),
+                    app_password=settings.get_backup_app_password(),
+                    recipients=settings.get_backup_recipients(),
+                    mdb_path=local_path,
+                    filename=filename,
+                )
+                n = len(settings.get_backup_recipients())
+                results.append(
+                    f'✅ Mailed to {n} recipient(s)' if ok else f'❌ Mail failed: {err}'
+                )
+            except Exception as e:
+                results.append(f'❌ Mail error: {e}')
+
+        # ── Copy delivery ──
+        if do_copy:
+            copy_dir = settings.get_backup_copy_dir()
+            if not copy_dir:
+                results.append('⚠️ Copy skipped — no directory configured')
+            else:
+                try:
+                    os.makedirs(copy_dir, exist_ok=True)
+                    dest = os.path.join(copy_dir, filename)
+                    shutil.copy2(local_path, dest)
+                    results.append(f'✅ Copied to {dest}')
+                except OSError as e:
+                    results.append(f'❌ Copy failed: {e}')
+
+        summary = ' | '.join(results) if results else '⚠️ No delivery method active'
+        logger.info(f"Backup ({triggered_by}): {summary}")
+        await _send(
+            bot,
+            f'📦 <b>MDB Backup</b> ({triggered_by})\n'
+            f'📄 {filename}\n'
+            f'🕐 {datetime.now().strftime("%d/%m/%Y %H:%M")}\n\n'
+            + '\n'.join(f'• {r}' for r in results),
+        )
+
+    except Exception as e:
+        logger.error(f"Backup error ({triggered_by}): {e}")
+        await _send(bot, f'⚠️ Backup failed ({triggered_by}): {e}')
+
+
 # ─── Scheduler loop ───────────────────────────────────────────────────────────
 
 async def run_scheduler(bot: Bot):
@@ -241,8 +336,10 @@ async def run_scheduler(bot: Bot):
     - Device online/offline alerts: every 5 minutes, always-on (not configurable).
     - Live punches: every minute, optional — toggle with /livepunches.
     - Daily report: once per day at configured time on configured days.
+    - MDB backup: scheduled daily or weekly per /dbbackup → Schedule Settings.
     """
     report_sent_today = None
+    backup_sent_today = None
     device_check_interval = 300   # 5 min
     last_device_check     = 0.0
 
@@ -264,10 +361,11 @@ async def run_scheduler(bot: Bot):
             # Live punches — every cycle
             await check_live_punches(bot)
 
+            today = now.date()
+
             # Daily report — once per day at configured time
             report_h = settings.get_daily_hour()
             report_m = settings.get_daily_minute()
-            today    = now.date()
 
             daily_days = {int(d.strip()) for d in settings.get_daily_days().split(',')
                           if d.strip().isdigit()}
@@ -282,6 +380,24 @@ async def run_scheduler(bot: Bot):
                     and report_sent_today != today):
                 await send_daily_report(bot)
                 report_sent_today = today
+
+            # Scheduled backup
+            if settings.get_backup_enabled() and backup_sent_today != today:
+                backup_h    = settings.get_backup_hour()
+                backup_m    = settings.get_backup_minute()
+                bk_schedule = settings.get_backup_schedule()
+
+                if bk_schedule == 'daily':
+                    run_today = True
+                else:  # weekly
+                    backup_days = {int(d.strip())
+                                   for d in settings.get_backup_days().split(',')
+                                   if d.strip().isdigit()}
+                    run_today = today.weekday() in backup_days
+
+                if run_today and now.hour == backup_h and now.minute == backup_m:
+                    await send_scheduled_backup(bot, triggered_by='scheduler')
+                    backup_sent_today = today
 
         except Exception as e:
             logger.error(f"Scheduler loop error: {e}")
