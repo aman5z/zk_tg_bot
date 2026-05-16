@@ -491,5 +491,5 @@ def backup_time_label() -> str:
 
 
 def backup_days_label() -> str:
-    days = [d.strip() for d in get_backup_days().split(',') if d.strip()]
+    days = [d.strip() for d in get_backup_days().split(',') if d.strip().isdigit()]
     return ', '.join(_DAY_NAMES.get(int(d), d) for d in days) or '—'

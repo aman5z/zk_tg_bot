@@ -4142,13 +4142,11 @@ async def callback_dbbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             stamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f"mdb_backup_{stamp}.mdb"
             with open(local_path, 'rb') as fh:
-                data_buf = BytesIO(fh.read())
-            data_buf.seek(0)
-            await query.message.reply_document(
-                document=data_buf,
-                filename=filename,
-                caption='📦 MDB backup (manual Telegram download)',
-            )
+                await query.message.reply_document(
+                    document=fh,
+                    filename=filename,
+                    caption='📦 MDB backup (manual Telegram download)',
+                )
             _audit('dbbackup.tg', update, f'file={filename} size={size_bytes}')
             await query.edit_message_text(f'✅ MDB sent as <code>{filename}</code>.', parse_mode=ParseMode.HTML)
         except Exception as e:
@@ -4303,9 +4301,12 @@ async def callback_dbbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sel = {int(d.strip()) for d in current.split(',') if d.strip().isdigit()}
         if day_num in sel:
             sel.discard(day_num)
+            if not sel:
+                # Prevent completely empty selection — keep current day toggled
+                sel.add(day_num)
         else:
             sel.add(day_num)
-        settings.set_backup_days(','.join(str(d) for d in sorted(sel)) if sel else '0')
+        settings.set_backup_days(','.join(str(d) for d in sorted(sel)))
         _audit('dbbackup.sched.days', update, f'days={settings.get_backup_days()}')
         await query.edit_message_reply_markup(reply_markup=_backup_days_menu_kb())
         return
