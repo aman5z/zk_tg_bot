@@ -126,7 +126,7 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_setmdb` | `/setmdb <path>` | Updates the MDB path in `config.ini` at runtime and immediately tests accessibility. |
 | `cmd_tables` | `/tables` | Lists all tables in the MDB file (diagnostic). |
 | `cmd_download` | `/download <ip>` | Read-only device snapshot and recent linked MDB punches (no download/write action). |
-| `cmd_dbbackup` | `/dbbackup` | Sends a read-only copy of the MDB file. |
+| `cmd_dbbackup` | `/dbbackup` | MDB Backup panel — inline keyboard with Telegram download, mail, copy, and schedule options. |
 | `cmd_importcsv` | `/importcsv` | CSV validation/preview only (no MDB import). |
 | `cmd_autonmap` | `/autonmap` | Suggests UID→badge matches only (not persisted). |
 | `cmd_shifts` | `/shifts` | Read-only shift configuration view. |
@@ -604,7 +604,7 @@ sudo journalctl -u zkbot -f    # live logs
 | `/setmdb <path>` | Update MDB path at runtime (no restart needed) |
 | `/tables` | List all tables in the MDB (diagnostic) |
 | `/download <ip>` | Read-only device snapshot + latest linked MDB punches (no write action) |
-| `/dbbackup` | Send a read-only copy of the MDB file |
+| `/dbbackup` | MDB Backup panel — Telegram download (if ≤49 MB), mail backup, copy to directory, or configure a recurring schedule |
 | `/importcsv` | Validate/preview uploaded CSV only; does not import into MDB |
 | `/autonmap` | Show UID→badge mapping suggestions only; does not persist |
 | `/shifts` | Read-only view of shift settings used by late/early checks |
@@ -653,6 +653,79 @@ All email configuration is managed entirely through this Telegram command — no
 
 ---
 
+#### `/dbbackup` — MDB Backup
+
+`/dbbackup` opens an inline-keyboard panel with four choices. **All actions are admin-only** and every action is written to the audit log.
+
+**Main panel buttons:**
+
+| Button | Action |
+|--------|--------|
+| 📱 Telegram Download | Sends the current MDB file as a Telegram document. Only shown when the file is ≤ 49 MB. Falls back gracefully if file is too large. |
+| 📧 Mail Backup | Emails the MDB file as an attachment to the configured backup recipients. |
+| 📁 Copy to Dir | Copies the MDB to the configured local directory. If no directory has been set yet, prompts for a path first, then copies immediately. |
+| ⚙️ Schedule Settings | Opens the recurring-backup configuration sub-panel. |
+
+**Schedule Settings sub-panel:**
+
+| Setting | Button | Description |
+|---------|--------|-------------|
+| On/Off | 🟢/🔴 On/Off | Enable or disable the auto-backup schedule. |
+| Frequency | 🔄 Frequency | `Daily` (every day) or `Weekly` (on configured days only). |
+| Time | 🕐 Time | Time to run the backup in `HH:MM` 24-hour format. |
+| Days | 📅 Days | Days of the week for weekly backups (tap to toggle). |
+| Method | 📬 Method | Delivery method: Telegram / Mail / Copy / combinations. |
+| Copy Dir | 📁 Copy Dir | Destination directory for copy-based backups. |
+| Backup Mail Settings | 📧 Backup Mail Settings | Opens the backup-specific mail configuration sub-panel. |
+
+**Backup Mail Settings sub-panel:**
+
+Uses identical UI and security patterns to `/editemail` but stores settings separately under `[dbbackup]` in `config.ini`. Leave any field blank to fall back to the corresponding `[smtp]` value.
+
+| Setting | Button | Description |
+|---------|--------|-------------|
+| Sender Email | 📤 Sender | Gmail address for backup emails. Blank = use `[smtp] sender_email`. |
+| Sender Name | 👤 Name | Display name. Blank = use `[smtp] sender_name`. |
+| App Password | 🔑 Password | Gmail App Password. Blank = use `[smtp] app_password`. |
+| Recipients | 👥 Recipients | Add/remove backup email recipients. Blank = use `[smtp] recipients`. |
+
+**`[dbbackup]` config keys** (all managed via `/dbbackup` — no manual editing needed):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `schedule_enabled` | `0` | `1` = auto-backup enabled |
+| `schedule` | `daily` | `daily` or `weekly` |
+| `schedule_hour` | `7` | Hour of scheduled backup (0–23) |
+| `schedule_minute` | `0` | Minute of scheduled backup (0–59) |
+| `schedule_days` | `0,1,2,3,6` | Days for weekly schedule (0=Mon … 6=Sun) |
+| `method` | `tg` | Delivery: `tg`, `mail`, `copy`, `mc`, `tm`, `tc`, `all` |
+| `copy_dir` | *(empty)* | Destination directory for copy backups |
+| `recipients` | *(empty)* | Backup email recipients (falls back to `[smtp]`) |
+| `sender_email` | *(empty)* | Backup sender email (falls back to `[smtp]`) |
+| `sender_name` | *(empty)* | Backup sender name (falls back to `[smtp]`) |
+| `app_password` | *(empty)* | Backup Gmail App Password (falls back to `[smtp]`) |
+
+**Audit log events written for `/dbbackup`:**
+
+| Event | Triggered by |
+|-------|-------------|
+| `dbbackup.open` | Admin opens the panel |
+| `dbbackup.tg` | Telegram download completed |
+| `dbbackup.tg.error` | Telegram download failed |
+| `dbbackup.mail` | Mail backup completed |
+| `dbbackup.mail.error` | Mail backup failed |
+| `dbbackup.copy` | Copy backup completed |
+| `dbbackup.copy.error` | Copy backup failed |
+| `dbbackup.copydir.set` | Copy directory configured |
+| `dbbackup.sched.toggle` | Schedule enabled/disabled |
+| `dbbackup.sched.freq` | Frequency changed |
+| `dbbackup.sched.time` | Schedule time changed |
+| `dbbackup.sched.days` | Schedule days changed |
+| `dbbackup.sched.method` | Delivery method changed |
+| `dbbackup.mail.*` | Backup mail settings changed |
+
+---
+
 ## Automated Notifications
 
 The `notifier.run_scheduler()` loop runs in the background as an asyncio task:
@@ -662,8 +735,9 @@ The `notifier.run_scheduler()` loop runs in the background as an asyncio task:
 | Every 5 minutes | Check all device online/offline states; alert in Telegram if any device changes state |
 | Daily at 08:15 (configurable) | Send absent employee list as a text summary + XLSX attachment to Telegram |
 | Daily at 08:15 (configurable, optional) | If `[smtp] enabled = 1` and `daily_email_enabled = 1`, also send the absent report by email |
+| Configured backup time | If `[dbbackup] schedule_enabled = 1`, deliver MDB backup via configured method(s) |
 
-Report timing is configurable via `/editdaily`. Email delivery is configurable via `/editemail`.
+Report timing is configurable via `/editdaily`. Email delivery is configurable via `/editemail`. Backup schedule is configurable via `/dbbackup` → ⚙️ Schedule Settings.
 
 ---
 
@@ -671,7 +745,7 @@ Report timing is configurable via `/editdaily`. Email delivery is configurable v
 
 - **MDB is read-only.** Middle East Attendance Software remains the single source of truth. The bot never writes to the database.
 - **Read-only adaptations.** `/importcsv`, `/autonmap`, `/download`, `/syncrange`, `/shifts`, and `/workdays` are implemented as read-only Telegram views/previews only; they do not persist changes.
-- **Backups are file copies only.** `/dbbackup` sends a copy of the MDB file for safekeeping and does not mutate the original MDB.
+- **Backups are file copies only.** `/dbbackup` creates a timestamped copy of the MDB file; it never mutates the original. The backup panel offers Telegram download (≤49 MB), email with attachment, local directory copy, and recurring scheduled delivery.
 - **Device user writes.** `/adduser` and `/usersync` write to ZKTeco devices only. Middle East Software picks up new users on its next "Download User Info" sync.
 - **Biometric enrollment** (fingerprint / face) must be performed physically on the device after adding a user.
 - **Weekend** = Friday + Saturday (UAE / Gulf calendar). Saturday (`weekday() == 5`) and Friday (`weekday() == 4`) are marked as weekends in all reports.
