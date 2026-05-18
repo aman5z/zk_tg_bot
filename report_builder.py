@@ -13,6 +13,7 @@ import matplotlib
 matplotlib.use('Agg')  # non-interactive backend — must be before pyplot import
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from openpyxl import Workbook
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 
@@ -167,6 +168,132 @@ def build_xlsx(rows: List[Dict], title: str = '', template: str = 'default',
         for col_letter, width in _COL_WIDTHS_XLS.items():
             ws.column_dimensions[col_letter].width = width
 
+    buf.seek(0)
+    return buf
+
+
+def build_timings_xlsx(
+    rows: List[Dict],
+    report_date: date,
+    departments_label: str = 'ALL',
+    template: str = 'default',
+    dept_totals: Optional[Dict[str, Dict[str, int]]] = None,
+    generated_at: Optional[str] = None,
+) -> BytesIO:
+    """Build grouped timings XLSX report."""
+    tpl = TEMPLATES.get(template, TEMPLATES['default'])
+    if generated_at is None:
+        generated_at = datetime.now().strftime('%d-%m-%Y %I:%M%p')
+
+    ordered_rows = sorted(
+        rows,
+        key=lambda r: (dept_sort_key(r.get('Department', '')),
+                       (r.get('Employee Name') or '').upper())
+    )
+    by_dept: Dict[str, List[Dict]] = {}
+    for row in ordered_rows:
+        by_dept.setdefault(row.get('Department') or 'Unknown', []).append(row)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Timings'
+
+    ws.merge_cells('A1:G1')
+    ws['A1'] = f"Timings Report — {report_date.strftime('%d/%m/%Y')}"
+    ws['A1'].font = Font(bold=True, size=13, color='FFFFFF')
+    ws['A1'].fill = PatternFill(
+        start_color=tpl['header_bg'].lstrip('#'),
+        end_color=tpl['header_bg'].lstrip('#'),
+        fill_type='solid')
+    ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+
+    ws.merge_cells('A2:G2')
+    ws['A2'] = f"Departments: {departments_label}  |  Generated: {generated_at}"
+    ws['A2'].font = Font(italic=True, size=10, color='444444')
+    ws['A2'].alignment = Alignment(horizontal='center', vertical='center')
+
+    headers = [
+        'Employee Name', 'Badge', 'Department',
+        'Check-In', 'Check-Out', 'Total Hours', 'Punch Count'
+    ]
+    header_fill = PatternFill(
+        start_color=tpl['header_bg'].lstrip('#'),
+        end_color=tpl['header_bg'].lstrip('#'),
+        fill_type='solid')
+    for col_idx, head in enumerate(headers, 1):
+        cell = ws.cell(row=4, column=col_idx, value=head)
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color='FFFFFF', size=11)
+        cell.alignment = Alignment(horizontal='center')
+
+    even_fill = PatternFill(
+        start_color=tpl['row_even'].lstrip('#'),
+        end_color=tpl['row_even'].lstrip('#'),
+        fill_type='solid')
+    dept_fill = PatternFill(
+        start_color=tpl['border'].lstrip('#'),
+        end_color=tpl['border'].lstrip('#'),
+        fill_type='solid')
+
+    row_idx = 5
+    stripe_idx = 0
+    for dept in sorted(by_dept, key=dept_sort_key):
+        ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=7)
+        dcell = ws.cell(row=row_idx, column=1, value=f'Department: {dept}')
+        dcell.font = Font(bold=True, color='333333')
+        dcell.fill = dept_fill
+        dcell.alignment = Alignment(horizontal='left')
+        row_idx += 1
+
+        dept_rows = by_dept[dept]
+        for entry in dept_rows:
+            values = [
+                entry.get('Employee Name', ''),
+                entry.get('Badge', ''),
+                entry.get('Department', ''),
+                entry.get('Check-In', '—'),
+                entry.get('Check-Out', '—'),
+                entry.get('Total Hours', '—'),
+                entry.get('Punch Count', 0),
+            ]
+            for col_idx, value in enumerate(values, 1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                if stripe_idx % 2 == 0:
+                    cell.fill = even_fill
+                if col_idx >= 4:
+                    cell.alignment = Alignment(horizontal='center')
+            row_idx += 1
+            stripe_idx += 1
+
+        present_count = sum(1 for r in dept_rows if int(r.get('Punch Count', 0)) > 0)
+        absent_count = len(dept_rows) - present_count
+        if dept_totals and dept in dept_totals:
+            present_count = int(dept_totals[dept].get('present', present_count))
+            absent_count = int(dept_totals[dept].get('absent', absent_count))
+
+        ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=6)
+        scell = ws.cell(
+            row=row_idx,
+            column=1,
+            value=f'Subtotal — Present: {present_count} | Absent: {absent_count}'
+        )
+        scell.font = Font(bold=True, italic=True, color='333333')
+        scell.fill = dept_fill
+        ws.cell(row=row_idx, column=7, value=len(dept_rows)).fill = dept_fill
+        ws.cell(row=row_idx, column=7).alignment = Alignment(horizontal='center')
+        row_idx += 2
+
+    ws.column_dimensions['A'].width = 36
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 22
+    ws.column_dimensions['D'].width = 12
+    ws.column_dimensions['E'].width = 12
+    ws.column_dimensions['F'].width = 12
+    ws.column_dimensions['G'].width = 12
+    ws.freeze_panes = 'A5'
+
+    buf = BytesIO()
+    wb.save(buf)
     buf.seek(0)
     return buf
 
