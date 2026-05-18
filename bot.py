@@ -1071,7 +1071,7 @@ def _build_timings_report(report_date: date, dept_query: str = '') -> dict:
     employees = mdb_reader.get_employees(active_only=True)
     uid_map = mdb_reader._uid_map()
     if not employees:
-        raise ValueError('❌ No employee records found.')
+        raise ValueError('No employee records found.')
 
     employees_by_uid = {
         e['uid']: (uid_map.get(e['uid']) or e)
@@ -1090,7 +1090,7 @@ def _build_timings_report(report_date: date, dept_query: str = '') -> dict:
             suggestions = [d for d in all_depts if dept_query.upper() in d.upper()]
             valid_list = suggestions[:12] if suggestions else all_depts[:12]
             raise ValueError(
-                f'❌ Department "{dept_query}" not found.\n'
+                f'Department "{dept_query}" not found.\n'
                 f'Valid departments include: {", ".join(valid_list)}'
             )
         dept_label = selected
@@ -1099,7 +1099,7 @@ def _build_timings_report(report_date: date, dept_query: str = '') -> dict:
             if (emp.get('dept') or '').upper() == selected.upper()
         }
         if not employees_by_uid:
-            raise ValueError(f'❌ No staff records found for department {selected}.')
+            raise ValueError(f'No staff records found for department {selected}.')
 
     punches = mdb_reader.get_attendance(report_date, report_date)
     day_by_uid = {}
@@ -1109,7 +1109,7 @@ def _build_timings_report(report_date: date, dept_query: str = '') -> dict:
             day_by_uid.setdefault(uid, []).append(p)
 
     if not day_by_uid:
-        raise ValueError(f'❌ No attendance data found for {report_date.strftime("%d/%m/%Y")}.')
+        raise ValueError(f'No attendance data found for {report_date.strftime("%d/%m/%Y")}.')
 
     rows = []
     dept_totals = {}
