@@ -88,6 +88,7 @@ _shell_lockouts: dict = {}      # user_id -> lockout metadata
 _sql_prompt_state: dict = {}    # chat_id -> pending sql input metadata
 _device_state: dict = {}        # chat_id -> pending /device prompt state
 _bk_state: dict = {}            # chat_id -> pending /dbbackup prompt state
+_timings_state: dict = {}       # chat_id -> pending /timings wizard state
 
 _audit_logger = logging.getLogger('ZKBot.Audit')
 if not _audit_logger.handlers:
@@ -475,7 +476,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/month — monthly dept summary\n"
         "/topabsent — most absent this month\n"
         "/dept &lt;name&gt; — today's attendance by department\n"
-        "/timings &lt;DD/MM/YYYY&gt; [&lt;DEPT&gt;] — check-in/out timings report\n"
+        "/timings — interactive timings wizard (or /timings &lt;DD/MM/YYYY&gt; [&lt;DEPT&gt;])\n"
         "/employeereport &lt;badge&gt; — employee month-to-date report\n"
         "/history &lt;DD/MM/YYYY&gt; &lt;DD/MM/YYYY&gt; — range report\n"
         "/syncrange &lt;DD/MM/YYYY&gt; &lt;DD/MM/YYYY&gt; — read-only range summary\n"
@@ -1007,17 +1008,181 @@ def _fmt_duration_hhmm(delta_seconds: float) -> str:
     return f'{hours:02d}:{mins:02d}'
 
 
+def _timings_date_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('📅 Today', callback_data='tm:date:today'),
+            InlineKeyboardButton('📆 Yesterday', callback_data='tm:date:yesterday'),
+        ],
+        [InlineKeyboardButton('🗓 Custom date', callback_data='tm:date:custom')],
+        [InlineKeyboardButton('❌ Cancel', callback_data='tm:cancel')],
+    ])
+
+
+def _timings_dept_choice_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('🏢 All departments', callback_data='tm:dept:all'),
+            InlineKeyboardButton('🎯 Specific department', callback_data='tm:dept:specific'),
+        ],
+        [InlineKeyboardButton('❌ Cancel', callback_data='tm:cancel')],
+    ])
+
+
+def _timings_specific_dept_kb(departments: list[str]) -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for idx, dept in enumerate(departments):
+        row.append(InlineKeyboardButton(dept, callback_data=f'tm:dept_idx:{idx}'))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton('✍️ Enter department', callback_data='tm:dept:manual')])
+    rows.append([InlineKeyboardButton('← Back', callback_data='tm:dept:back')])
+    rows.append([InlineKeyboardButton('❌ Cancel', callback_data='tm:cancel')])
+    return InlineKeyboardMarkup(rows)
+
+
+def _timings_format_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📊 Excel (.xlsx)', callback_data='tm:fmt:xlsx')],
+        [InlineKeyboardButton('❌ Cancel', callback_data='tm:cancel')],
+    ])
+
+
+def _timings_all_departments() -> list[str]:
+    employees = mdb_reader.get_employees(active_only=True)
+    uid_map = mdb_reader._uid_map()
+    employees_by_uid = {
+        e['uid']: (uid_map.get(e['uid']) or e)
+        for e in employees
+        if e.get('uid')
+    }
+    return sorted(
+        {(e.get('dept') or 'Unknown').strip() or 'Unknown'
+         for e in employees_by_uid.values()},
+        key=dept_sort_key
+    )
+
+
+def _build_timings_report(report_date: date, dept_query: str = '') -> dict:
+    employees = mdb_reader.get_employees(active_only=True)
+    uid_map = mdb_reader._uid_map()
+    if not employees:
+        raise ValueError('❌ No employee records found.')
+
+    employees_by_uid = {
+        e['uid']: (uid_map.get(e['uid']) or e)
+        for e in employees
+        if e.get('uid')
+    }
+    all_depts = sorted(
+        {(e.get('dept') or 'Unknown').strip() or 'Unknown'
+         for e in employees_by_uid.values()},
+        key=dept_sort_key
+    )
+    dept_label = 'ALL'
+    if dept_query and dept_query.upper() != 'ALL':
+        selected = next((d for d in all_depts if d.upper() == dept_query.upper()), None)
+        if not selected:
+            suggestions = [d for d in all_depts if dept_query.upper() in d.upper()]
+            valid_list = suggestions[:12] if suggestions else all_depts[:12]
+            raise ValueError(
+                f'❌ Department "{dept_query}" not found.\n'
+                f'Valid departments include: {", ".join(valid_list)}'
+            )
+        dept_label = selected
+        employees_by_uid = {
+            uid: emp for uid, emp in employees_by_uid.items()
+            if (emp.get('dept') or '').upper() == selected.upper()
+        }
+        if not employees_by_uid:
+            raise ValueError(f'❌ No staff records found for department {selected}.')
+
+    punches = mdb_reader.get_attendance(report_date, report_date)
+    day_by_uid = {}
+    for p in punches:
+        uid = p.get('uid')
+        if uid in employees_by_uid:
+            day_by_uid.setdefault(uid, []).append(p)
+
+    if not day_by_uid:
+        raise ValueError(f'❌ No attendance data found for {report_date.strftime("%d/%m/%Y")}.')
+
+    rows = []
+    dept_totals = {}
+    for uid, emp in sorted(
+        employees_by_uid.items(),
+        key=lambda item: (dept_sort_key(item[1].get('dept', '')),
+                          (item[1].get('name') or '').upper())
+    ):
+        dept = (emp.get('dept') or 'Unknown').strip() or 'Unknown'
+        punches_for_uid = sorted(day_by_uid.get(uid, []), key=lambda p: p['timestamp'])
+        first_punch = punches_for_uid[0]['time'] if punches_for_uid else '—'
+        last_punch = punches_for_uid[-1]['time'] if punches_for_uid else '—'
+        punch_count = len(punches_for_uid)
+        total_hours = '—'
+        if punch_count > 0:
+            duration = punches_for_uid[-1]['timestamp'] - punches_for_uid[0]['timestamp']
+            total_hours = _fmt_duration_hhmm(duration.total_seconds())
+
+        rows.append({
+            'Employee Name': emp.get('name', ''),
+            'Badge': emp.get('badge', ''),
+            'Department': dept,
+            'Check-In': first_punch,
+            'Check-Out': last_punch,
+            'Total Hours': total_hours,
+            'Punch Count': punch_count,
+        })
+
+        dept_totals.setdefault(dept, {'present': 0, 'absent': 0})
+        if punch_count > 0:
+            dept_totals[dept]['present'] += 1
+        else:
+            dept_totals[dept]['absent'] += 1
+
+    total_staff = len(rows)
+    total_present = sum(s['present'] for s in dept_totals.values())
+    total_absent = sum(s['absent'] for s in dept_totals.values())
+    dept_names = sorted(dept_totals.keys(), key=dept_sort_key)
+
+    summary = (
+        f"📊 <b>Timings Report — {report_date.strftime('%d/%m/%Y')}</b>\n"
+        f"👥 Total Staff: {total_staff}\n"
+        f"✅ Present: {total_present}  ❌ Absent: {total_absent}\n"
+        f"🏢 Departments: {'ALL' if dept_label == 'ALL' else dept_label}\n"
+        f"📚 Covered: {', '.join(dept_names)}"
+    )
+    file_name = f"{report_date.strftime('%d-%m-%Y')} Timings Report.xlsx"
+    report_file = report_builder.build_timings_xlsx(
+        rows=rows,
+        report_date=report_date,
+        departments_label=dept_label,
+        dept_totals=dept_totals,
+    )
+    return {
+        'summary': summary,
+        'file_name': file_name,
+        'report_file': report_file,
+        'caption': f'Timings report — {report_date.strftime("%d/%m/%Y")}',
+    }
+
+
 async def cmd_timings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Usage: /timings DD/MM/YYYY [DEPARTMENT]"""
+    """Usage: /timings [DD/MM/YYYY [DEPARTMENT]]"""
     if not _allowed(update):
         return await _deny(update)
     if not ctx.args:
         await update.message.reply_text(
-            '📖 Usage: /timings DD/MM/YYYY [DEPARTMENT]\n'
-            'Examples:\n'
-            '/timings 15/05/2026\n'
-            '/timings 15/05/2026 ADMIN'
+            '🧭 <b>Timings Report Wizard</b>\n\n'
+            'Step 1: Choose date',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_date_kb(),
         )
+        _timings_state[str(update.effective_chat.id)] = {'awaiting': None}
         return
 
     date_str = ctx.args[0]
@@ -1034,116 +1199,150 @@ async def cmd_timings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text('⏳ Building timings report...')
     try:
-        employees = mdb_reader.get_employees(active_only=True)
-        uid_map = mdb_reader._uid_map()
-        if not employees:
-            await update.message.reply_text('❌ No employee records found.')
-            return
-
-        employees_by_uid = {
-            e['uid']: (uid_map.get(e['uid']) or e)
-            for e in employees
-            if e.get('uid')
-        }
-        all_depts = sorted(
-            {(e.get('dept') or 'Unknown').strip() or 'Unknown'
-             for e in employees_by_uid.values()},
-            key=dept_sort_key
-        )
-        dept_label = 'ALL'
-        if dept_query:
-            selected = next((d for d in all_depts if d.upper() == dept_query.upper()), None)
-            if not selected:
-                suggestions = [d for d in all_depts if dept_query.upper() in d.upper()]
-                valid_list = suggestions[:12] if suggestions else all_depts[:12]
-                await update.message.reply_text(
-                    f'❌ Department "{dept_query}" not found.\n'
-                    f'Valid departments include: {", ".join(valid_list)}'
-                )
-                return
-            dept_label = selected
-            employees_by_uid = {
-                uid: emp for uid, emp in employees_by_uid.items()
-                if (emp.get('dept') or '').upper() == selected.upper()
-            }
-            if not employees_by_uid:
-                await update.message.reply_text(
-                    f'❌ No staff records found for department {selected}.')
-                return
-
-        punches = mdb_reader.get_attendance(report_date, report_date)
-        day_by_uid = {}
-        for p in punches:
-            uid = p.get('uid')
-            if uid in employees_by_uid:
-                day_by_uid.setdefault(uid, []).append(p)
-
-        if not day_by_uid:
-            await update.message.reply_text(
-                f'❌ No attendance data found for {report_date.strftime("%d/%m/%Y")}.')
-            return
-
-        rows = []
-        dept_totals = {}
-        for uid, emp in sorted(
-            employees_by_uid.items(),
-            key=lambda item: (dept_sort_key(item[1].get('dept', '')),
-                              (item[1].get('name') or '').upper())
-        ):
-            dept = (emp.get('dept') or 'Unknown').strip() or 'Unknown'
-            punches_for_uid = sorted(day_by_uid.get(uid, []), key=lambda p: p['timestamp'])
-            first_punch = punches_for_uid[0]['time'] if punches_for_uid else '—'
-            last_punch = punches_for_uid[-1]['time'] if punches_for_uid else '—'
-            punch_count = len(punches_for_uid)
-            total_hours = '—'
-            if punch_count > 0:
-                duration = punches_for_uid[-1]['timestamp'] - punches_for_uid[0]['timestamp']
-                total_hours = _fmt_duration_hhmm(duration.total_seconds())
-
-            rows.append({
-                'Employee Name': emp.get('name', ''),
-                'Badge': emp.get('badge', ''),
-                'Department': dept,
-                'Check-In': first_punch,
-                'Check-Out': last_punch,
-                'Total Hours': total_hours,
-                'Punch Count': punch_count,
-            })
-
-            dept_totals.setdefault(dept, {'present': 0, 'absent': 0})
-            if punch_count > 0:
-                dept_totals[dept]['present'] += 1
-            else:
-                dept_totals[dept]['absent'] += 1
-
-        total_staff = len(rows)
-        total_present = sum(s['present'] for s in dept_totals.values())
-        total_absent = sum(s['absent'] for s in dept_totals.values())
-        dept_names = sorted(dept_totals.keys(), key=dept_sort_key)
-
-        summary = (
-            f"📊 <b>Timings Report — {report_date.strftime('%d/%m/%Y')}</b>\n"
-            f"👥 Total Staff: {total_staff}\n"
-            f"✅ Present: {total_present}  ❌ Absent: {total_absent}\n"
-            f"🏢 Departments: {'ALL' if dept_label == 'ALL' else dept_label}\n"
-            f"📚 Covered: {', '.join(dept_names)}"
-        )
-        await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
-
-        file_name = f"{report_date.strftime('%d-%m-%Y')} Timings Report.xlsx"
-        report_file = report_builder.build_timings_xlsx(
-            rows=rows,
-            report_date=report_date,
-            departments_label=dept_label,
-            dept_totals=dept_totals,
-        )
+        built = _build_timings_report(report_date, dept_query)
+        await update.message.reply_text(built['summary'], parse_mode=ParseMode.HTML)
         await update.message.reply_document(
-            document=report_file,
-            filename=file_name,
-            caption=f'Timings report — {report_date.strftime("%d/%m/%Y")}'
+            document=built['report_file'],
+            filename=built['file_name'],
+            caption=built['caption']
         )
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
+
+
+async def callback_timings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle all inline keyboard callbacks for /timings wizard (prefix 'tm:')."""
+    query = update.callback_query
+    await query.answer()
+    if not _allowed(update):
+        return
+
+    data = query.data or ''
+    chat_id = str(update.effective_chat.id)
+    st = _timings_state.setdefault(chat_id, {'awaiting': None})
+    action = data[3:]
+
+    if action == 'cancel':
+        _timings_state.pop(chat_id, None)
+        await query.edit_message_text('❌ Timings wizard cancelled.')
+        return
+
+    if action.startswith('date:'):
+        key = action[5:]
+        if key == 'today':
+            st['date'] = date.today()
+            st['awaiting'] = None
+            await query.edit_message_text(
+                f'📅 Date selected: <b>{st["date"].strftime("%d/%m/%Y")}</b>\n\nStep 2: Choose department',
+                parse_mode=ParseMode.HTML,
+                reply_markup=_timings_dept_choice_kb(),
+            )
+            return
+        if key == 'yesterday':
+            st['date'] = date.today() - timedelta(days=1)
+            st['awaiting'] = None
+            await query.edit_message_text(
+                f'📅 Date selected: <b>{st["date"].strftime("%d/%m/%Y")}</b>\n\nStep 2: Choose department',
+                parse_mode=ParseMode.HTML,
+                reply_markup=_timings_dept_choice_kb(),
+            )
+            return
+        if key == 'custom':
+            st['awaiting'] = 'timings_date'
+            await query.edit_message_text(
+                '🗓 <b>Custom Date</b>\n\nReply with date as <code>DD/MM/YYYY</code>.\nExample: <code>15/05/2026</code>',
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+    if action == 'dept:back':
+        await query.edit_message_text(
+            f'📅 Date selected: <b>{st.get("date", date.today()).strftime("%d/%m/%Y")}</b>\n\nStep 2: Choose department',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_dept_choice_kb(),
+        )
+        return
+
+    if action == 'dept:all':
+        st['dept'] = 'ALL'
+        st['awaiting'] = None
+        await query.edit_message_text(
+            '🏢 Department selected: <b>ALL</b>\n\nStep 3: Choose output format',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_format_kb(),
+        )
+        return
+
+    if action == 'dept:specific':
+        try:
+            departments = _timings_all_departments()
+        except Exception as e:
+            await query.edit_message_text(f'❌ {e}')
+            return
+        if not departments:
+            await query.edit_message_text('❌ No departments found.')
+            return
+        st['dept_options'] = departments
+        await query.edit_message_text(
+            '🎯 <b>Select Department</b>\nTap a department or enter one manually.',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_specific_dept_kb(departments),
+        )
+        return
+
+    if action == 'dept:manual':
+        st['awaiting'] = 'timings_dept'
+        await query.edit_message_text(
+            '✍️ <b>Enter Department</b>\n\nReply with exact department name.\n'
+            'Send <code>all</code> to include all departments.',
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action.startswith('dept_idx:'):
+        try:
+            idx = int(action.split(':', 1)[1])
+        except ValueError:
+            await query.edit_message_text('❌ Invalid department selection.')
+            return
+        options = st.get('dept_options') or []
+        if idx < 0 or idx >= len(options):
+            await query.edit_message_text('❌ Department list expired. Run /timings again.')
+            return
+        st['dept'] = options[idx]
+        st['awaiting'] = None
+        await query.edit_message_text(
+            f'🏢 Department selected: <b>{html.escape(st["dept"])}</b>\n\nStep 3: Choose output format',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_format_kb(),
+        )
+        return
+
+    if action.startswith('fmt:'):
+        fmt = action[4:].strip().lower()
+        if fmt != 'xlsx':
+            await query.edit_message_text('❌ Only Excel format is currently supported for /timings.')
+            return
+        report_date = st.get('date')
+        if not report_date:
+            await query.edit_message_text('❌ Date not selected. Run /timings and start again.')
+            _timings_state.pop(chat_id, None)
+            return
+        dept = st.get('dept', 'ALL')
+        await query.edit_message_text('⏳ Building timings report...')
+        try:
+            built = _build_timings_report(report_date, '' if dept == 'ALL' else dept)
+            await query.message.reply_text(built['summary'], parse_mode=ParseMode.HTML)
+            await query.message.reply_document(
+                document=built['report_file'],
+                filename=built['file_name'],
+                caption=built['caption'],
+            )
+            await query.edit_message_text('✅ Timings report generated.')
+            _timings_state.pop(chat_id, None)
+        except Exception as e:
+            await query.edit_message_text(f'❌ {e}')
+        return
 
 
 async def cmd_syncrange(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2942,6 +3141,62 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f'Total: {len(recipients)}',
                 parse_mode=ParseMode.HTML)
             return
+
+    timings_st = _timings_state.get(chat_id)
+    if timings_st and timings_st.get('awaiting') == 'timings_date':
+        try:
+            report_date = datetime.strptime(text, '%d/%m/%Y').date()
+        except ValueError:
+            await update.message.reply_text(
+                '❌ Invalid date format.\nPlease send date as <code>DD/MM/YYYY</code>.',
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        timings_st['date'] = report_date
+        timings_st['awaiting'] = None
+        await update.message.reply_text(
+            f'📅 Date selected: <b>{report_date.strftime("%d/%m/%Y")}</b>\n\nStep 2: Choose department',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_dept_choice_kb(),
+        )
+        return
+
+    if timings_st and timings_st.get('awaiting') == 'timings_dept':
+        dept_query = text.strip()
+        if not dept_query:
+            await update.message.reply_text('❌ Department cannot be empty. Please try again.')
+            return
+        if dept_query.lower() in ('all', '*'):
+            timings_st['dept'] = 'ALL'
+            timings_st['awaiting'] = None
+            await update.message.reply_text(
+                '🏢 Department selected: <b>ALL</b>\n\nStep 3: Choose output format',
+                parse_mode=ParseMode.HTML,
+                reply_markup=_timings_format_kb(),
+            )
+            return
+        try:
+            all_depts = _timings_all_departments()
+        except Exception as e:
+            await update.message.reply_text(f'❌ {e}')
+            return
+        selected = next((d for d in all_depts if d.upper() == dept_query.upper()), None)
+        if not selected:
+            suggestions = [d for d in all_depts if dept_query.upper() in d.upper()]
+            valid_list = suggestions[:12] if suggestions else all_depts[:12]
+            await update.message.reply_text(
+                f'❌ Department "{dept_query}" not found.\n'
+                f'Valid departments include: {", ".join(valid_list)}'
+            )
+            return
+        timings_st['dept'] = selected
+        timings_st['awaiting'] = None
+        await update.message.reply_text(
+            f'🏢 Department selected: <b>{html.escape(selected)}</b>\n\nStep 3: Choose output format',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_format_kb(),
+        )
+        return
 
     st = _edit_state.get(chat_id)
     if not st or not st.get('awaiting'):
@@ -4850,6 +5105,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_admin, pattern=r'^adm:'))
     app.add_handler(CallbackQueryHandler(callback_device, pattern=r'^dev:'))
     app.add_handler(CallbackQueryHandler(callback_dbbackup, pattern=r'^bk:'))
+    app.add_handler(CallbackQueryHandler(callback_timings, pattern=r'^tm:'))
     app.add_handler(CallbackQueryHandler(callback_calendar))
 
     # Text input handler (for edit panel awaiting states)
