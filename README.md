@@ -106,7 +106,7 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_month` | `/month` | Per-department attendance percentage for the month to date. |
 | `cmd_topabsent` | `/topabsent` | Top 10 most-absent employees for the current month. |
 | `cmd_dept` | `/dept <name>` | Today's present/absent breakdown for matching department name(s). |
-| `cmd_timings` | `/timings` (interactive) or `/timings DD/MM/YYYY [DEPARTMENT]` | Interactive wizard (date → department → format) for timings report; also supports direct argument mode for date and optional department. |
+| `cmd_timings` | `/timings` (interactive) or `/timings DD/MM/YYYY [DEPARTMENT]` | Interactive wizard (date → department → view mode → format). Summary mode uses first punch as check-in and last punch outside `checkin_window_mins` as check-out. Direct argument mode defaults to Summary + Excel. |
 | `cmd_history` | `/history DD/MM/YYYY DD/MM/YYYY` | Day-by-day attendance summary for a custom date range (max 31 days). |
 | `cmd_syncrange` | `/syncrange DD/MM/YYYY DD/MM/YYYY` | Read-only range summary (no write-back/sync to MDB). |
 | `cmd_trend` | `/trend [days]` | Attendance trend over the last working days (default 14). |
@@ -407,6 +407,7 @@ exclude = DELETED EMPLOYEES,TRANSPORT # departments excluded from reports
 
 [attendance]
 shift_start = 07:30                   # late-arrival threshold (HH:MM, 24h)
+checkin_window_mins = 30              # punches within this window from first punch are treated as check-in registration noise
 
 [notifications]
 notify_punches       = 0              # 1 = send Telegram message per punch (noisy)
@@ -570,8 +571,8 @@ sudo journalctl -u zkbot -f    # live logs
 | `/month` | Per-department attendance percentage, month to date |
 | `/topabsent` | Top 10 most-absent employees this month |
 | `/dept <name>` | Present/absent breakdown for matching department name(s) |
-| `/timings` | Interactive timings wizard: choose date (Today/Yesterday/Custom), department (All/Specific), and format (supported: Excel) |
-| `/timings DD/MM/YYYY [DEPARTMENT]` | Bulk check-in/check-out timings report (all staff or one department) as XLSX |
+| `/timings` | Interactive timings wizard: date (Today/Yesterday/Custom) → department (All/Specific) → view mode (Summary/All Punches) → format (Excel/PDF/PNG) |
+| `/timings DD/MM/YYYY [DEPARTMENT]` | Bulk timings report (default: Summary mode, Excel). Department is optional; omitted = ALL departments |
 | `/history DD/MM/YYYY DD/MM/YYYY` | Day-by-day attendance for a custom range (max 31 days) |
 | `/syncrange DD/MM/YYYY DD/MM/YYYY` | Read-only range summary (no write-back to MDB) |
 | `/trend [days]` | Attendance trend over latest working days (default 14) |
@@ -581,6 +582,23 @@ Examples:
 - `/timings` → guided wizard
 - `/timings 15/05/2026`
 - `/timings 15/05/2026 ADMIN`
+
+Wizard flow:
+1. Date: `Today` / `Yesterday` / `Custom Date`
+2. Department: `All departments` / `Specific department`
+3. View: `Summary (In/Out only)` / `All Punches`
+4. Format: `Excel` / `PDF` / `PNG`
+
+Summary status values:
+- `✅ Complete` — check-in and valid check-out available
+- `⏳ In Only` — only check-in exists, or all punches are within check-in window
+- `❌ Absent` — no punches for the day
+
+`/timings` summary columns:
+`Employee Name | Badge | Department | Check-In | Check-Out | Total Hours | Status`
+
+`/timings` all-punches columns:
+`Employee Name | Badge | Department | Punch # | Time | Device/Sensor | Total Punches`
 
 ### Employee
 

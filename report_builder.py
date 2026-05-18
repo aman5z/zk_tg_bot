@@ -176,6 +176,7 @@ def build_timings_xlsx(
     rows: List[Dict],
     report_date: date,
     departments_label: str = 'ALL',
+    mode: str = 'summary',
     template: str = 'default',
     dept_totals: Optional[Dict[str, Dict[str, int]]] = None,
     generated_at: Optional[str] = None,
@@ -184,6 +185,9 @@ def build_timings_xlsx(
     tpl = TEMPLATES.get(template, TEMPLATES['default'])
     if generated_at is None:
         generated_at = datetime.now().strftime('%d-%m-%Y %I:%M%p')
+    mode = (mode or 'summary').strip().lower()
+    if mode not in {'summary', 'all'}:
+        mode = 'summary'
 
     ordered_rows = sorted(
         rows,
@@ -212,16 +216,25 @@ def build_timings_xlsx(
     ws['A2'].font = Font(italic=True, size=10, color='444444')
     ws['A2'].alignment = Alignment(horizontal='center', vertical='center')
 
+    ws.merge_cells('A3:G3')
+    ws['A3'] = f"View: {'Summary (In/Out)' if mode == 'summary' else 'All Punches'}"
+    ws['A3'].font = Font(italic=True, size=10, color='444444')
+    ws['A3'].alignment = Alignment(horizontal='center', vertical='center')
+
     headers = [
-        'Employee Name', 'Badge', 'Department',
-        'Check-In', 'Check-Out', 'Total Hours', 'Punch Count'
+        'Employee Name', 'Badge', 'Department'
     ]
+    if mode == 'summary':
+        headers += ['Check-In', 'Check-Out', 'Total Hours', 'Status']
+    else:
+        headers += ['Punch #', 'Time', 'Device/Sensor', 'Total Punches']
+
     header_fill = PatternFill(
         start_color=tpl['header_bg'].lstrip('#'),
         end_color=tpl['header_bg'].lstrip('#'),
         fill_type='solid')
     for col_idx, head in enumerate(headers, 1):
-        cell = ws.cell(row=4, column=col_idx, value=head)
+        cell = ws.cell(row=5, column=col_idx, value=head)
         cell.fill = header_fill
         cell.font = Font(bold=True, color='FFFFFF', size=11)
         cell.alignment = Alignment(horizontal='center')
@@ -235,7 +248,7 @@ def build_timings_xlsx(
         end_color=tpl['border'].lstrip('#'),
         fill_type='solid')
 
-    row_idx = 5
+    row_idx = 6
     stripe_idx = 0
     for dept in sorted(by_dept, key=dept_sort_key):
         ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=7)
@@ -247,15 +260,21 @@ def build_timings_xlsx(
 
         dept_rows = by_dept[dept]
         for entry in dept_rows:
-            values = [
-                entry.get('Employee Name', ''),
-                entry.get('Badge', ''),
-                entry.get('Department', ''),
-                entry.get('Check-In', '—'),
-                entry.get('Check-Out', '—'),
-                entry.get('Total Hours', '—'),
-                entry.get('Punch Count', 0),
-            ]
+            values = [entry.get('Employee Name', ''), entry.get('Badge', ''), entry.get('Department', '')]
+            if mode == 'summary':
+                values += [
+                    entry.get('Check-In', '—'),
+                    entry.get('Check-Out', '—'),
+                    entry.get('Total Hours', ''),
+                    entry.get('Status', ''),
+                ]
+            else:
+                values += [
+                    entry.get('Punch #', '—'),
+                    entry.get('Time', '—'),
+                    entry.get('Device/Sensor', '—'),
+                    entry.get('Total Punches', 0),
+                ]
             for col_idx, value in enumerate(values, 1):
                 cell = ws.cell(row=row_idx, column=col_idx, value=value)
                 if stripe_idx % 2 == 0:
@@ -265,18 +284,34 @@ def build_timings_xlsx(
             row_idx += 1
             stripe_idx += 1
 
-        present_count = sum(1 for r in dept_rows if int(r.get('Punch Count', 0)) > 0)
-        absent_count = len(dept_rows) - present_count
-        if dept_totals and dept in dept_totals:
-            present_count = int(dept_totals[dept].get('present', present_count))
-            absent_count = int(dept_totals[dept].get('absent', absent_count))
+        present_count = absent_count = complete_count = in_only_count = 0
+        if mode == 'summary':
+            complete_count = sum(1 for r in dept_rows if r.get('Status') == '✅ Complete')
+            in_only_count = sum(1 for r in dept_rows if r.get('Status') == '⏳ In Only')
+            absent_count = sum(1 for r in dept_rows if r.get('Status') == '❌ Absent')
+            present_count = complete_count + in_only_count
+            if dept_totals and dept in dept_totals:
+                present_count = int(dept_totals[dept].get('present', present_count))
+                absent_count = int(dept_totals[dept].get('absent', absent_count))
+        else:
+            present_count = len({r.get('Badge') for r in dept_rows if r.get('Total Punches', 0)})
+            absent_count = 0
+            if dept_totals and dept in dept_totals:
+                absent_count = int(dept_totals[dept].get('absent', 0))
+                present_count = int(dept_totals[dept].get('present', present_count))
 
         ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=6)
-        scell = ws.cell(
-            row=row_idx,
-            column=1,
-            value=f'Subtotal — Present: {present_count} | Absent: {absent_count}'
-        )
+        if mode == 'summary':
+            subtotal_txt = (
+                f'Subtotal — ✅ Complete: {complete_count} | '
+                f'⏳ In Only: {in_only_count} | ❌ Absent: {absent_count}'
+            )
+        else:
+            subtotal_txt = (
+                f'Subtotal — Present Staff: {present_count} | '
+                f'Absent Staff: {absent_count}'
+            )
+        scell = ws.cell(row=row_idx, column=1, value=subtotal_txt)
         scell.font = Font(bold=True, italic=True, color='333333')
         scell.fill = dept_fill
         ws.cell(row=row_idx, column=7, value=len(dept_rows)).fill = dept_fill
@@ -289,13 +324,133 @@ def build_timings_xlsx(
     ws.column_dimensions['D'].width = 12
     ws.column_dimensions['E'].width = 12
     ws.column_dimensions['F'].width = 12
-    ws.column_dimensions['G'].width = 12
-    ws.freeze_panes = 'A5'
+    ws.column_dimensions['G'].width = 18
+    ws.freeze_panes = 'A6'
 
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf
+
+
+def _timings_table_fig(
+    rows: List[List[str]],
+    headers: List[str],
+    title: str,
+    template: str = 'default',
+) -> plt.Figure:
+    tpl = TEMPLATES.get(template, TEMPLATES['default'])
+    n = len(rows)
+    fig_h = max(3.2, 1.4 + n * 0.34)
+    fig, ax = plt.subplots(figsize=(14, fig_h))
+    ax.set_facecolor('white')
+    fig.patch.set_facecolor('white')
+    ax.axis('off')
+    if rows:
+        cell_colors = [
+            [tpl['row_even'] if i % 2 == 0 else tpl['row_odd']] * len(headers)
+            for i in range(n)
+        ]
+        col_colors = [_hex_to_rgb(tpl['header_bg'])] * len(headers)
+        tbl = ax.table(
+            cellText=rows,
+            colLabels=headers,
+            cellColours=cell_colors,
+            colColours=col_colors,
+            loc='upper center',
+            cellLoc='left',
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(8)
+        for j in range(len(headers)):
+            tbl[0, j].set_text_props(color=tpl['header_fg'], fontweight='bold')
+            width = 1.0 / len(headers)
+            for i in range(n + 1):
+                tbl[i, j].set_width(width)
+    else:
+        ax.text(0.5, 0.5, 'No rows found.', ha='center', va='center', fontsize=14, transform=ax.transAxes)
+    fig.suptitle(title, fontsize=10, fontweight='bold', y=0.99, color='#333333')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    return fig
+
+
+def build_timings_report(
+    rows: List[Dict],
+    report_date: date,
+    departments_label: str = 'ALL',
+    mode: str = 'summary',
+    fmt: str = 'xlsx',
+    template: str = 'default',
+    dept_totals: Optional[Dict[str, Dict[str, int]]] = None,
+    generated_at: Optional[str] = None,
+) -> BytesIO:
+    mode = (mode or 'summary').strip().lower()
+    if mode not in {'summary', 'all'}:
+        mode = 'summary'
+    fmt = (fmt or 'xlsx').strip().lower()
+    if generated_at is None:
+        generated_at = datetime.now().strftime('%d-%m-%Y %I:%M%p')
+
+    if fmt == 'xlsx':
+        return build_timings_xlsx(
+            rows=rows,
+            report_date=report_date,
+            departments_label=departments_label,
+            mode=mode,
+            template=template,
+            dept_totals=dept_totals,
+            generated_at=generated_at,
+        )
+
+    headers = ['Employee Name', 'Badge', 'Department']
+    if mode == 'summary':
+        headers += ['Check-In', 'Check-Out', 'Total Hours', 'Status']
+    else:
+        headers += ['Punch #', 'Time', 'Device/Sensor', 'Total Punches']
+    ordered = sorted(
+        rows,
+        key=lambda r: (dept_sort_key(r.get('Department', '')), (r.get('Employee Name') or '').upper())
+    )
+    def _display_value(header: str, value) -> str:
+        text = str(value if value is not None else '')
+        if header == 'Status':
+            return (text
+                    .replace('✅ Complete', 'Complete')
+                    .replace('⏳ In Only', 'In Only')
+                    .replace('❌ Absent', 'Absent'))
+        return text
+
+    table_rows = [[_display_value(h, r.get(h, '')) for h in headers] for r in ordered]
+    title = (
+        f"Timings Report — {report_date.strftime('%d/%m/%Y')} | "
+        f"Departments: {departments_label} | Generated: {generated_at} | "
+        f"View: {'Summary (In/Out)' if mode == 'summary' else 'All Punches'}"
+    )
+
+    if fmt == 'png':
+        fig = _timings_table_fig(table_rows, headers, title=title, template=template)
+        buf = BytesIO()
+        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    if fmt == 'pdf':
+        buf = BytesIO()
+        with PdfPages(buf) as pdf:
+            page_size = 36
+            pages = [table_rows[i:i + page_size] for i in range(0, len(table_rows), page_size)] or [[]]
+            for idx, page_rows in enumerate(pages, 1):
+                page_title = title
+                if len(pages) > 1:
+                    page_title = f"{title} (Page {idx}/{len(pages)})"
+                fig = _timings_table_fig(page_rows, headers, title=page_title, template=template)
+                pdf.savefig(fig, bbox_inches='tight', facecolor='white', edgecolor='none')
+                plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    raise ValueError(f'Unsupported timings format: {fmt}')
 
 
 # ─── PNG ──────────────────────────────────────────────────────────────────────
