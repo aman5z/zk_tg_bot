@@ -1047,7 +1047,21 @@ def _timings_specific_dept_kb(departments: list[str]) -> InlineKeyboardMarkup:
 
 def _timings_format_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('📊 Excel (.xlsx)', callback_data='tm:fmt:xlsx')],
+        [
+            InlineKeyboardButton('📊 Excel', callback_data='tm:fmt:xlsx'),
+            InlineKeyboardButton('📄 PDF', callback_data='tm:fmt:pdf'),
+            InlineKeyboardButton('🖼 PNG', callback_data='tm:fmt:png'),
+        ],
+        [InlineKeyboardButton('← Back', callback_data='tm:fmt:back')],
+        [InlineKeyboardButton('❌ Cancel', callback_data='tm:cancel')],
+    ])
+
+
+def _timings_view_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📌 Summary (In/Out only)', callback_data='tm:view:summary')],
+        [InlineKeyboardButton('🧾 All Punches', callback_data='tm:view:all')],
+        [InlineKeyboardButton('← Back', callback_data='tm:view:back')],
         [InlineKeyboardButton('❌ Cancel', callback_data='tm:cancel')],
     ])
 
@@ -1067,7 +1081,19 @@ def _timings_all_departments() -> list[str]:
     )
 
 
-def _build_timings_report(report_date: date, dept_query: str = '') -> dict:
+def _build_timings_report(
+    report_date: date,
+    dept_query: str = '',
+    view_mode: str = 'summary',
+    output_format: str = 'xlsx',
+) -> dict:
+    output_format = (output_format or 'xlsx').strip().lower()
+    if output_format not in {'xlsx', 'pdf', 'png'}:
+        raise ValueError('Invalid format. Use one of: xlsx, pdf, png.')
+    view_mode = (view_mode or 'summary').strip().lower()
+    if view_mode not in {'summary', 'all'}:
+        raise ValueError('Invalid view mode. Use summary or all.')
+
     employees = mdb_reader.get_employees(active_only=True)
     uid_map = mdb_reader._uid_map()
     if not employees:
@@ -1108,10 +1134,9 @@ def _build_timings_report(report_date: date, dept_query: str = '') -> dict:
         if uid in employees_by_uid:
             day_by_uid.setdefault(uid, []).append(p)
 
-    if not day_by_uid:
-        raise ValueError(f'No attendance data found for {report_date.strftime("%d/%m/%Y")}.')
-
-    rows = []
+    checkin_window = timedelta(minutes=settings.get_checkin_window_mins())
+    summary_rows = []
+    all_punch_rows = []
     dept_totals = {}
     for uid, emp in sorted(
         employees_by_uid.items(),
@@ -1120,22 +1145,35 @@ def _build_timings_report(report_date: date, dept_query: str = '') -> dict:
     ):
         dept = (emp.get('dept') or 'Unknown').strip() or 'Unknown'
         punches_for_uid = sorted(day_by_uid.get(uid, []), key=lambda p: p['timestamp'])
-        first_punch = punches_for_uid[0]['time'] if punches_for_uid else '—'
-        last_punch = punches_for_uid[-1]['time'] if punches_for_uid else '—'
         punch_count = len(punches_for_uid)
-        total_hours = '—'
+        check_in = '—'
+        check_out = '—'
+        total_hours = ''
+        status = '❌ Absent'
         if punch_count > 0:
-            duration = punches_for_uid[-1]['timestamp'] - punches_for_uid[0]['timestamp']
-            total_hours = _fmt_duration_hhmm(duration.total_seconds())
+            first = punches_for_uid[0]
+            check_in = first['time']
+            status = '⏳ In Only'
+            valid_after_window = [
+                p for p in punches_for_uid[1:]
+                if p['timestamp'] > (first['timestamp'] + checkin_window)
+            ]
+            if valid_after_window:
+                last = valid_after_window[-1]
+                check_out = last['time']
+                total_hours = _fmt_duration_hhmm(
+                    (last['timestamp'] - first['timestamp']).total_seconds()
+                )
+                status = '✅ Complete'
 
-        rows.append({
+        summary_rows.append({
             'Employee Name': emp.get('name', ''),
             'Badge': emp.get('badge', ''),
             'Department': dept,
-            'Check-In': first_punch,
-            'Check-Out': last_punch,
+            'Check-In': check_in,
+            'Check-Out': check_out,
             'Total Hours': total_hours,
-            'Punch Count': punch_count,
+            'Status': status,
         })
 
         dept_totals.setdefault(dept, {'present': 0, 'absent': 0})
@@ -1143,31 +1181,64 @@ def _build_timings_report(report_date: date, dept_query: str = '') -> dict:
             dept_totals[dept]['present'] += 1
         else:
             dept_totals[dept]['absent'] += 1
+        if not punches_for_uid:
+            all_punch_rows.append({
+                'Employee Name': emp.get('name', ''),
+                'Badge': emp.get('badge', ''),
+                'Department': dept,
+                'Punch #': '—',
+                'Time': '—',
+                'Device/Sensor': '—',
+                'Total Punches': 0,
+            })
+            continue
+        for idx, punch in enumerate(punches_for_uid, 1):
+            all_punch_rows.append({
+                'Employee Name': emp.get('name', ''),
+                'Badge': emp.get('badge', ''),
+                'Department': dept,
+                'Punch #': idx,
+                'Time': punch['time'],
+                'Device/Sensor': punch.get('device', '—') or '—',
+                'Total Punches': punch_count,
+            })
 
-    total_staff = len(rows)
-    total_present = sum(s['present'] for s in dept_totals.values())
+    total_staff = len(summary_rows)
     total_absent = sum(s['absent'] for s in dept_totals.values())
     dept_names = sorted(dept_totals.keys(), key=dept_sort_key)
+    total_complete = sum(1 for r in summary_rows if r['Status'] == '✅ Complete')
+    total_in_only = sum(1 for r in summary_rows if r['Status'] == '⏳ In Only')
+    view_label = 'Summary (In/Out)' if view_mode == 'summary' else 'All Punches'
+    date_label = report_date.strftime('%d/%m/%Y')
+    generated_at = datetime.now().strftime('%d-%m-%Y %I:%M%p')
 
     summary = (
-        f"📊 <b>Timings Report — {report_date.strftime('%d/%m/%Y')}</b>\n"
+        f"📊 <b>Timings Report — {date_label}</b>\n"
         f"👥 Total Staff: {total_staff}\n"
-        f"✅ Present: {total_present}  ❌ Absent: {total_absent}\n"
+        f"✅ Complete: {total_complete}  ⏳ In Only: {total_in_only}  ❌ Absent: {total_absent}\n"
         f"🏢 Departments: {'ALL' if dept_label == 'ALL' else dept_label}\n"
+        f"👀 View: {view_label}\n"
         f"📚 Covered: {', '.join(dept_names)}"
     )
-    file_name = f"{report_date.strftime('%d-%m-%Y')} Timings Report.xlsx"
-    report_file = report_builder.build_timings_xlsx(
-        rows=rows,
+    file_name = (
+        f"{report_date.strftime('%d-%m-%Y')} Timings Report "
+        f"{'Summary' if view_mode == 'summary' else 'All Punches'}.{output_format}"
+    )
+    report_rows = summary_rows if view_mode == 'summary' else all_punch_rows
+    report_file = report_builder.build_timings_report(
+        rows=report_rows,
         report_date=report_date,
         departments_label=dept_label,
+        mode=view_mode,
+        fmt=output_format,
         dept_totals=dept_totals,
+        generated_at=generated_at,
     )
     return {
         'summary': summary,
         'file_name': file_name,
         'report_file': report_file,
-        'caption': f'Timings report — {report_date.strftime("%d/%m/%Y")}',
+        'caption': f'Timings report — {date_label} ({view_label})',
     }
 
 
@@ -1199,7 +1270,12 @@ async def cmd_timings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text('⏳ Building timings report...')
     try:
-        built = _build_timings_report(report_date, dept_query)
+        built = _build_timings_report(
+            report_date,
+            dept_query,
+            view_mode='summary',
+            output_format='xlsx',
+        )
         await update.message.reply_text(built['summary'], parse_mode=ParseMode.HTML)
         await update.message.reply_document(
             document=built['report_file'],
@@ -1267,9 +1343,9 @@ async def callback_timings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         st['dept'] = 'ALL'
         st['awaiting'] = None
         await query.edit_message_text(
-            '🏢 Department selected: <b>ALL</b>\n\nStep 3: Choose output format',
+            '🏢 Department selected: <b>ALL</b>\n\nStep 3: Choose view mode',
             parse_mode=ParseMode.HTML,
-            reply_markup=_timings_format_kb(),
+            reply_markup=_timings_view_kb(),
         )
         return
 
@@ -1312,16 +1388,45 @@ async def callback_timings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         st['dept'] = options[idx]
         st['awaiting'] = None
         await query.edit_message_text(
-            f'🏢 Department selected: <b>{html.escape(st["dept"])}</b>\n\nStep 3: Choose output format',
+            f'🏢 Department selected: <b>{html.escape(st["dept"])}</b>\n\nStep 3: Choose view mode',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_view_kb(),
+        )
+        return
+
+    if action == 'view:back':
+        await query.edit_message_text(
+            f'📅 Date selected: <b>{st.get("date", date.today()).strftime("%d/%m/%Y")}</b>\n\nStep 2: Choose department',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_dept_choice_kb(),
+        )
+        return
+
+    if action.startswith('view:'):
+        view_mode = action[5:].strip().lower()
+        if view_mode not in {'summary', 'all'}:
+            await query.edit_message_text('❌ Invalid view mode selected.')
+            return
+        st['view'] = view_mode
+        await query.edit_message_text(
+            f'👀 View selected: <b>{"Summary (In/Out)" if view_mode == "summary" else "All Punches"}</b>\n\nStep 4: Choose output format',
             parse_mode=ParseMode.HTML,
             reply_markup=_timings_format_kb(),
         )
         return
 
+    if action == 'fmt:back':
+        await query.edit_message_text(
+            'Step 3: Choose view mode',
+            parse_mode=ParseMode.HTML,
+            reply_markup=_timings_view_kb(),
+        )
+        return
+
     if action.startswith('fmt:'):
         fmt = action[4:].strip().lower()
-        if fmt != 'xlsx':
-            await query.edit_message_text('❌ Only Excel format is currently supported for /timings.')
+        if fmt not in {'xlsx', 'pdf', 'png'}:
+            await query.edit_message_text('❌ Invalid format selected.')
             return
         report_date = st.get('date')
         if not report_date:
@@ -1329,15 +1434,27 @@ async def callback_timings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             _timings_state.pop(chat_id, None)
             return
         dept = st.get('dept', 'ALL')
+        view_mode = st.get('view', 'summary')
         await query.edit_message_text('⏳ Building timings report...')
         try:
-            built = _build_timings_report(report_date, '' if dept == 'ALL' else dept)
-            await query.message.reply_text(built['summary'], parse_mode=ParseMode.HTML)
-            await query.message.reply_document(
-                document=built['report_file'],
-                filename=built['file_name'],
-                caption=built['caption'],
+            built = _build_timings_report(
+                report_date,
+                '' if dept == 'ALL' else dept,
+                view_mode=view_mode,
+                output_format=fmt,
             )
+            await query.message.reply_text(built['summary'], parse_mode=ParseMode.HTML)
+            if fmt == 'png':
+                await query.message.reply_photo(
+                    photo=built['report_file'],
+                    caption=built['caption'],
+                )
+            else:
+                await query.message.reply_document(
+                    document=built['report_file'],
+                    filename=built['file_name'],
+                    caption=built['caption'],
+                )
             await query.edit_message_text('✅ Timings report generated.')
             _timings_state.pop(chat_id, None)
         except Exception as e:
@@ -3170,9 +3287,9 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             timings_st['dept'] = 'ALL'
             timings_st['awaiting'] = None
             await update.message.reply_text(
-                '🏢 Department selected: <b>ALL</b>\n\nStep 3: Choose output format',
+                '🏢 Department selected: <b>ALL</b>\n\nStep 3: Choose view mode',
                 parse_mode=ParseMode.HTML,
-                reply_markup=_timings_format_kb(),
+                reply_markup=_timings_view_kb(),
             )
             return
         try:
@@ -3192,9 +3309,9 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         timings_st['dept'] = selected
         timings_st['awaiting'] = None
         await update.message.reply_text(
-            f'🏢 Department selected: <b>{html.escape(selected)}</b>\n\nStep 3: Choose output format',
+            f'🏢 Department selected: <b>{html.escape(selected)}</b>\n\nStep 3: Choose view mode',
             parse_mode=ParseMode.HTML,
-            reply_markup=_timings_format_kb(),
+            reply_markup=_timings_view_kb(),
         )
         return
 

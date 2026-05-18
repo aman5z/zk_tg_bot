@@ -185,6 +185,18 @@ def set_live_punches(val: bool):
     _save()
 
 
+# ─── Attendance settings ───────────────────────────────────────────────────────
+
+def get_checkin_window_mins() -> int:
+    return max(0, _cfg.getint('attendance', 'checkin_window_mins', fallback=30))
+
+
+def set_checkin_window_mins(val: int):
+    _ensure('attendance')
+    _cfg['attendance']['checkin_window_mins'] = str(max(0, int(val)))
+    _save()
+
+
 # ─── Device settings ───────────────────────────────────────────────────────────
 
 def get_device_timeout() -> int:
