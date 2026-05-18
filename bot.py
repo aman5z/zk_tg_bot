@@ -1096,7 +1096,7 @@ async def cmd_timings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             last_punch = punches_for_uid[-1]['time'] if punches_for_uid else '—'
             punch_count = len(punches_for_uid)
             total_hours = '—'
-            if punch_count >= 1:
+            if punch_count > 0:
                 duration = punches_for_uid[-1]['timestamp'] - punches_for_uid[0]['timestamp']
                 total_hours = _fmt_duration_hhmm(duration.total_seconds())
 
