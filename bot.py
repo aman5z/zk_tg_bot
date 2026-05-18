@@ -34,7 +34,7 @@ import notifier
 import settings
 import report_builder
 import email_sender
-from report_builder import TEMPLATES as REPORT_TEMPLATES, DEPT_ORDER
+from report_builder import TEMPLATES as REPORT_TEMPLATES, DEPT_ORDER, dept_sort_key
 from settings import _DAY_NAMES
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -475,6 +475,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/month — monthly dept summary\n"
         "/topabsent — most absent this month\n"
         "/dept &lt;name&gt; — today's attendance by department\n"
+        "/timings &lt;DD/MM/YYYY&gt; [&lt;DEPT&gt;] — check-in/out timings report\n"
         "/employeereport &lt;badge&gt; — employee month-to-date report\n"
         "/history &lt;DD/MM/YYYY&gt; &lt;DD/MM/YYYY&gt; — range report\n"
         "/syncrange &lt;DD/MM/YYYY&gt; &lt;DD/MM/YYYY&gt; — read-only range summary\n"
@@ -998,6 +999,152 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
+
+
+def _fmt_duration_hhmm(delta_seconds: float) -> str:
+    total_minutes = max(0, int(delta_seconds // 60))
+    hours, mins = divmod(total_minutes, 60)
+    return f'{hours:02d}:{mins:02d}'
+
+
+async def cmd_timings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /timings DD/MM/YYYY [DEPARTMENT]"""
+    if not _allowed(update):
+        return await _deny(update)
+    if not ctx.args:
+        await update.message.reply_text(
+            '📖 Usage: /timings DD/MM/YYYY [DEPARTMENT]\n'
+            'Examples:\n'
+            '/timings 15/05/2026\n'
+            '/timings 15/05/2026 ADMIN'
+        )
+        return
+
+    date_str = ctx.args[0]
+    dept_query = ' '.join(ctx.args[1:]).strip()
+    try:
+        report_date = datetime.strptime(date_str, '%d/%m/%Y').date()
+    except ValueError:
+        await update.message.reply_text(
+            '❌ Invalid date format.\n'
+            'Usage: /timings DD/MM/YYYY [DEPARTMENT]\n'
+            'Example: /timings 15/05/2026 ADMIN'
+        )
+        return
+
+    await update.message.reply_text('⏳ Building timings report...')
+    try:
+        employees = mdb_reader.get_employees(active_only=True)
+        uid_map = mdb_reader._uid_map()
+        if not employees:
+            await update.message.reply_text('❌ No employee records found.')
+            return
+
+        employees_by_uid = {
+            e['uid']: (uid_map.get(e['uid']) or e)
+            for e in employees
+            if e.get('uid')
+        }
+        all_depts = sorted(
+            {(e.get('dept') or 'Unknown').strip() or 'Unknown'
+             for e in employees_by_uid.values()},
+            key=dept_sort_key
+        )
+        dept_label = 'ALL'
+        if dept_query:
+            selected = next((d for d in all_depts if d.upper() == dept_query.upper()), None)
+            if not selected:
+                suggestions = [d for d in all_depts if dept_query.upper() in d.upper()]
+                valid_list = suggestions[:12] if suggestions else all_depts[:12]
+                await update.message.reply_text(
+                    f'❌ Department "{dept_query}" not found.\n'
+                    f'Valid departments include: {", ".join(valid_list)}'
+                )
+                return
+            dept_label = selected
+            employees_by_uid = {
+                uid: emp for uid, emp in employees_by_uid.items()
+                if (emp.get('dept') or '').upper() == selected.upper()
+            }
+            if not employees_by_uid:
+                await update.message.reply_text(
+                    f'❌ No staff records found for department {selected}.')
+                return
+
+        punches = mdb_reader.get_attendance(report_date, report_date)
+        day_by_uid = {}
+        for p in punches:
+            uid = p.get('uid')
+            if uid in employees_by_uid:
+                day_by_uid.setdefault(uid, []).append(p)
+
+        if not day_by_uid:
+            await update.message.reply_text(
+                f'❌ No attendance data found for {report_date.strftime("%d/%m/%Y")}.')
+            return
+
+        rows = []
+        dept_totals = {}
+        for uid, emp in sorted(
+            employees_by_uid.items(),
+            key=lambda item: (dept_sort_key(item[1].get('dept', '')),
+                              (item[1].get('name') or '').upper())
+        ):
+            dept = (emp.get('dept') or 'Unknown').strip() or 'Unknown'
+            punches_for_uid = sorted(day_by_uid.get(uid, []), key=lambda p: p['timestamp'])
+            first_punch = punches_for_uid[0]['time'] if punches_for_uid else '—'
+            last_punch = punches_for_uid[-1]['time'] if punches_for_uid else '—'
+            punch_count = len(punches_for_uid)
+            total_hours = '—'
+            if punch_count > 0:
+                duration = punches_for_uid[-1]['timestamp'] - punches_for_uid[0]['timestamp']
+                total_hours = _fmt_duration_hhmm(duration.total_seconds())
+
+            rows.append({
+                'Employee Name': emp.get('name', ''),
+                'Badge': emp.get('badge', ''),
+                'Department': dept,
+                'Check-In': first_punch,
+                'Check-Out': last_punch,
+                'Total Hours': total_hours,
+                'Punch Count': punch_count,
+            })
+
+            dept_totals.setdefault(dept, {'present': 0, 'absent': 0})
+            if punch_count > 0:
+                dept_totals[dept]['present'] += 1
+            else:
+                dept_totals[dept]['absent'] += 1
+
+        total_staff = len(rows)
+        total_present = sum(s['present'] for s in dept_totals.values())
+        total_absent = sum(s['absent'] for s in dept_totals.values())
+        dept_names = sorted(dept_totals.keys(), key=dept_sort_key)
+
+        summary = (
+            f"📊 <b>Timings Report — {report_date.strftime('%d/%m/%Y')}</b>\n"
+            f"👥 Total Staff: {total_staff}\n"
+            f"✅ Present: {total_present}  ❌ Absent: {total_absent}\n"
+            f"🏢 Departments: {'ALL' if dept_label == 'ALL' else dept_label}\n"
+            f"📚 Covered: {', '.join(dept_names)}"
+        )
+        await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
+
+        file_name = f"{report_date.strftime('%d-%m-%Y')} Timings Report.xlsx"
+        report_file = report_builder.build_timings_xlsx(
+            rows=rows,
+            report_date=report_date,
+            departments_label=dept_label,
+            dept_totals=dept_totals,
+        )
+        await update.message.reply_document(
+            document=report_file,
+            filename=file_name,
+            caption=f'Timings report — {report_date.strftime("%d/%m/%Y")}'
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
 
 async def cmd_syncrange(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Usage: /syncrange DD/MM/YYYY DD/MM/YYYY (read-only summary)."""
@@ -4648,6 +4795,7 @@ def main():
         ('month',       cmd_month),
         ('topabsent',   cmd_topabsent),
         ('dept',        cmd_dept),
+        ('timings',     cmd_timings),
         ('history',     cmd_history),
         ('syncrange',   cmd_syncrange),
         ('trend',       cmd_trend),

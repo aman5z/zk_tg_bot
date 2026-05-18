@@ -106,6 +106,7 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_month` | `/month` | Per-department attendance percentage for the month to date. |
 | `cmd_topabsent` | `/topabsent` | Top 10 most-absent employees for the current month. |
 | `cmd_dept` | `/dept <name>` | Today's present/absent breakdown for matching department name(s). |
+| `cmd_timings` | `/timings DD/MM/YYYY [DEPARTMENT]` | Sends a grouped XLSX report with each employee's first/last punch, total hours, punch count, and department present/absent subtotals for that date. |
 | `cmd_history` | `/history DD/MM/YYYY DD/MM/YYYY` | Day-by-day attendance summary for a custom date range (max 31 days). |
 | `cmd_syncrange` | `/syncrange DD/MM/YYYY DD/MM/YYYY` | Read-only range summary (no write-back/sync to MDB). |
 | `cmd_trend` | `/trend [days]` | Attendance trend over the last working days (default 14). |
@@ -569,10 +570,15 @@ sudo journalctl -u zkbot -f    # live logs
 | `/month` | Per-department attendance percentage, month to date |
 | `/topabsent` | Top 10 most-absent employees this month |
 | `/dept <name>` | Present/absent breakdown for matching department name(s) |
+| `/timings DD/MM/YYYY [DEPARTMENT]` | Bulk check-in/check-out timings report (all staff or one department) as XLSX |
 | `/history DD/MM/YYYY DD/MM/YYYY` | Day-by-day attendance for a custom range (max 31 days) |
 | `/syncrange DD/MM/YYYY DD/MM/YYYY` | Read-only range summary (no write-back to MDB) |
 | `/trend [days]` | Attendance trend over latest working days (default 14) |
 | `/report` | Send today's absent list as an XLSX file |
+
+Examples:
+- `/timings 15/05/2026`
+- `/timings 15/05/2026 ADMIN`
 
 ### Employee
 
