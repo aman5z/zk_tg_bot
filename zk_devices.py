@@ -68,7 +68,10 @@ def ping_device(ip: str, timeout_secs: Optional[int] = None) -> tuple:
     """
     Return (online, error_message) using ping3 with subprocess fallback.
     """
-    timeout = max(1, int(timeout_secs or settings.get_ping_timeout_secs()))
+    timeout = max(
+        1,
+        int(timeout_secs) if timeout_secs is not None else settings.get_ping_timeout_secs()
+    )
     if _ping3_ping:
         try:
             latency = _ping3_ping(ip, timeout=timeout)

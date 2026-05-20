@@ -343,7 +343,8 @@ async def check_device_health(bot: Bot):
             if s['status'] == 'offline':
                 if not prev.get('offline'):
                     last = s.get('last_punch')
-                    last_txt = last['timestamp'].strftime('%d/%m/%Y %I:%M%p') if last else 'N/A'
+                    ts = last.get('timestamp') if isinstance(last, dict) else None
+                    last_txt = ts.strftime('%d/%m/%Y %I:%M%p') if ts else 'N/A'
                     await _send_admins(
                         bot,
                         f"⚠️ <b>Device {s['sensor_id']} ({s['ip']}) - Unreachable (ping failed)</b>\n"
@@ -356,7 +357,8 @@ async def check_device_health(bot: Bot):
             if s['stale']:
                 if not prev.get('stale'):
                     last = s.get('last_punch')
-                    last_txt = last['timestamp'].strftime('%d/%m/%Y %I:%M%p') if last else 'N/A'
+                    ts = last.get('timestamp') if isinstance(last, dict) else None
+                    last_txt = ts.strftime('%d/%m/%Y %I:%M%p') if ts else 'N/A'
                     await _send_admins(
                         bot,
                         f"⚠️ <b>Device {s['sensor_id']} ({s['ip']}) - Online but stale</b>\n"
