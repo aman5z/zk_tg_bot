@@ -266,7 +266,11 @@ def get_devices() -> list:
         for i, (key, ip) in enumerate(device_items):
             if not ip:
                 continue
-            sensor_id = key.split('_', 1)[1].strip() if '_' in key else str(i + 1)
+            raw_sensor = key.split('_', 1)[1].strip() if '_' in key else ''
+            if raw_sensor.isdigit():
+                sensor_id = f'{int(raw_sensor):02d}'
+            else:
+                sensor_id = raw_sensor or f'{i + 1:02d}'
             devices.append({
                 'ip': ip,
                 'name': f'Device {sensor_id}',
