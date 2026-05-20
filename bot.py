@@ -477,16 +477,16 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/topabsent — most absent this month\n"
         "/dept &lt;name&gt; — today's attendance by department\n"
         "/timings — interactive timings wizard (or /timings &lt;DD/MM/YYYY&gt; [&lt;DEPT&gt;])\n"
-        "/employeereport &lt;badge&gt; — employee month-to-date report\n"
+        "/employeereport &lt;badge or name&gt; — employee month-to-date report\n"
         "/history &lt;DD/MM/YYYY&gt; &lt;DD/MM/YYYY&gt; — range report\n"
         "/syncrange &lt;DD/MM/YYYY&gt; &lt;DD/MM/YYYY&gt; — read-only range summary\n"
         "/trend — attendance trend (last 14 working days)\n"
         "/report — send absent report (XLSX/PNG/PDF)\n\n"
         "<b>Employee</b>\n"
         "/search &lt;name or badge&gt; — find employee\n"
-        "/punches &lt;badge&gt; — today's punches\n"
-        "/calendar &lt;badge&gt; — interactive date/range picker\n"
-        "/calendar &lt;badge&gt; YYYY-MM — static monthly calendar\n\n"
+        "/punches &lt;badge or name&gt; — today's punches\n"
+        "/calendar &lt;badge or name&gt; — interactive date/range picker\n"
+        "/calendar &lt;badge or name&gt; YYYY-MM — static monthly calendar\n\n"
         "<b>Devices</b>\n"
         "/device — device admin panel (status/add/edit/remove/rename)\n"
         "/devices — all device status\n"
@@ -3532,20 +3532,47 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
 
+
+async def _resolve_employee_badge_or_name(update: Update, query_str: str):
+    query = query_str.strip()
+    if query.isdigit():
+        emps = mdb_reader.search_employee(query)
+        emp = next((e for e in emps if e['badge'] == query), None)
+        if not emp:
+            await update.message.reply_text(f'❌ No employee found matching "{query}".')
+            return None
+        return emp
+
+    emps = mdb_reader.search_employee(query)
+    if not emps:
+        await update.message.reply_text(f'❌ No employee found matching "{query}".')
+        return None
+    if len(emps) > 1:
+        lines = [f'⚠️ Multiple matches for "<b>{html.escape(query)}</b>". Please use badge number:\n']
+        for e in emps[:10]:
+            lines.append(f"[{e['badge']}] {html.escape(e['name'])} — {html.escape(e['dept'])}")
+        await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+        return None
+    return emps[0]
+
+
 async def cmd_punches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Usage: /punches <badge>"""
+    """Usage: /punches <badge or name>"""
     if not _allowed(update):
         return await _deny(update)
     if not ctx.args:
-        await update.message.reply_text('Usage: /punches &lt;badge&gt;',
+        await update.message.reply_text('Usage: /punches &lt;badge or name&gt;',
                                         parse_mode=ParseMode.HTML)
         return
-    badge = ctx.args[0].strip()
+    query_str = ctx.args[0].strip()
     try:
+        emp = await _resolve_employee_badge_or_name(update, query_str)
+        if not emp:
+            return
+        badge = emp['badge']
+        name = emp['name']
         today = date.today()
         punches = mdb_reader.get_employee_punches(badge, today, today)
-        emps = mdb_reader.search_employee(badge)
-        name = emps[0]['name'] if emps else badge
         if not punches:
             await update.message.reply_text(f'No punches today for {name} ({badge})')
             return
@@ -3558,19 +3585,23 @@ async def cmd_punches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f'❌ {e}')
 
 async def cmd_employeereport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Usage: /employeereport <badge>"""
+    """Usage: /employeereport <badge or name>"""
     if not _allowed(update):
         return await _deny(update)
     if not ctx.args:
         await update.message.reply_text(
-            'Usage: /employeereport &lt;badge&gt;\nExample: /employeereport 1024',
+            'Usage: /employeereport &lt;badge or name&gt;\nExample: /employeereport 1024',
             parse_mode=ParseMode.HTML)
         return
-    badge = ctx.args[0].strip()
+    query_str = ctx.args[0].strip()
     today = date.today()
     first_day = today.replace(day=1)
-    await update.message.reply_text('⏳ Building employee report...')
     try:
+        emp = await _resolve_employee_badge_or_name(update, query_str)
+        if not emp:
+            return
+        badge = emp['badge']
+        await update.message.reply_text('⏳ Building employee report...')
         rep = mdb_reader.get_employee_report(badge, first_day, today)
         emp = rep['employee']
         lines = [
@@ -3606,7 +3637,7 @@ async def cmd_employeereport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f'❌ {e}')
 
 async def cmd_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Usage: /calendar <badge> [YYYY-MM]
+    """Usage: /calendar <badge or name> [YYYY-MM]
     Without YYYY-MM → interactive date/range picker with inline keyboard.
     With YYYY-MM → static emoji-grid calendar (existing behaviour).
     """
@@ -3615,11 +3646,21 @@ async def cmd_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text(
             'Usage:\n'
-            '  /calendar &lt;badge&gt; — interactive date/range picker\n'
-            '  /calendar &lt;badge&gt; YYYY-MM — static monthly calendar\n'
+            '  /calendar &lt;badge or name&gt; — interactive date/range picker\n'
+            '  /calendar &lt;badge or name&gt; YYYY-MM — static monthly calendar\n'
             'Example: /calendar 1024', parse_mode=ParseMode.HTML)
         return
-    badge = ctx.args[0].strip()
+    query_str = ctx.args[0].strip()
+    try:
+        emp = await _resolve_employee_badge_or_name(update, query_str)
+        if not emp:
+            return
+        badge = emp['badge']
+        name = emp['name']
+        dept = emp['dept']
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+        return
 
     # ── Static monthly calendar (legacy, with explicit month) ──────────
     if len(ctx.args) > 1:
@@ -3639,18 +3680,6 @@ async def cmd_calendar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Interactive calendar picker ─────────────────────────────────────
-    try:
-        emps = mdb_reader.search_employee(badge)
-        if not emps:
-            await update.message.reply_text(f'❌ No employee found for badge "{badge}"')
-            return
-        emp  = emps[0]
-        name = emp['name']
-        dept = emp['dept']
-    except Exception as e:
-        await update.message.reply_text(f'❌ {e}')
-        return
-
     chat_id = str(update.effective_chat.id)
     _cal_state[chat_id] = {'badge': badge, 'name': name, 'dept': dept}
 

@@ -112,9 +112,9 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_trend` | `/trend [days]` | Attendance trend over the last working days (default 14). |
 | `cmd_report` | `/report` | Triggers `notifier.send_daily_report()` on demand — sends today's absent list as an XLSX file. |
 | `cmd_search` | `/search <name or badge>` | Searches employee records by name or badge number (partial match, case-insensitive). Returns up to 20 results with active/inactive status. |
-| `cmd_punches` | `/punches <badge>` | Lists today's punch times for a specific employee, labelled `→ IN` / `← OUT` by order. |
-| `cmd_employeereport` | `/employeereport <badge>` | Month-to-date read-only attendance report for one employee. |
-| `cmd_calendar` | `/calendar <badge> [YYYY-MM]` | Renders a full-month emoji calendar grid for an employee. Defaults to the current month. |
+| `cmd_punches` | `/punches <badge or name>` | Lists today's punch times for a specific employee, labelled `→ IN` / `← OUT` by order. |
+| `cmd_employeereport` | `/employeereport <badge or name>` | Month-to-date read-only attendance report for one employee. |
+| `cmd_calendar` | `/calendar <badge or name> [YYYY-MM]` | Renders a full-month emoji calendar grid for an employee. Defaults to the current month. |
 | `cmd_device` | `/device` | Admin-only inline device panel. Shows live ping status for each configured device and lets admins add, edit, remove, or rename devices directly in `config.ini`. |
 | `cmd_devices` | `/devices` | Pings all configured ZKTeco devices and reports online status, user count, and device clock. |
 | `cmd_clocksync` | `/clocksync` | Sets the clock on every device to the current system time. |
@@ -605,9 +605,9 @@ Summary status values:
 | Command | Description |
 |---------|-------------|
 | `/search <name or badge>` | Search employees by name or badge (partial match) |
-| `/punches <badge>` | Today's punch times for one employee, labelled IN/OUT |
-| `/employeereport <badge>` | Month-to-date read-only attendance report for one employee |
-| `/calendar <badge> [YYYY-MM]` | Monthly emoji attendance calendar for one employee |
+| `/punches <badge or name>` | Today's punch times for one employee, labelled IN/OUT |
+| `/employeereport <badge or name>` | Month-to-date read-only attendance report for one employee |
+| `/calendar <badge or name> [YYYY-MM]` | Monthly emoji attendance calendar for one employee |
 
 ### Devices
 
