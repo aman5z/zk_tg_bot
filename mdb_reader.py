@@ -577,6 +577,74 @@ def get_latest_punches(n: int = 10, days_back: int = 3) -> list:
     return result
 
 
+def get_last_punch() -> Optional[dict]:
+    """
+    Return the single most recent punch found in CHECKINOUT, or None.
+    Includes resolved employee details when available.
+    """
+    rows = _mdb_export('CHECKINOUT')
+    latest = None
+    for r in rows:
+        chk = (r.get('CHECKTIME') or '').strip()
+        uid = (r.get('USERID') or '').strip()
+        if not chk or not uid:
+            continue
+        dt = _parse_dt(chk)
+        if not dt:
+            continue
+        if latest is None or dt > latest['timestamp']:
+            latest = {
+                'uid': uid,
+                'timestamp': dt,
+                'date': dt.date(),
+                'time': dt.strftime('%H:%M:%S'),
+                'device': (r.get('SENSORID') or '').strip(),
+            }
+    if not latest:
+        return None
+    emp = _uid_map().get(latest['uid'])
+    latest['badge'] = emp['badge'] if emp else latest['uid']
+    latest['name'] = emp['name'] if emp else 'Unknown'
+    latest['dept'] = emp['dept'] if emp else '—'
+    return latest
+
+
+def get_last_punch_per_device() -> dict:
+    """
+    Return latest punch per SENSORID.
+    Dict: sensorid -> punch dict (with timestamp/device and resolved employee info).
+    """
+    rows = _mdb_export('CHECKINOUT')
+    latest_by_device = {}
+    for r in rows:
+        chk = (r.get('CHECKTIME') or '').strip()
+        uid = (r.get('USERID') or '').strip()
+        dev = (r.get('SENSORID') or '').strip() or 'unknown'
+        if not chk or not uid:
+            continue
+        dt = _parse_dt(chk)
+        if not dt:
+            continue
+        cur = latest_by_device.get(dev)
+        if cur is None or dt > cur['timestamp']:
+            latest_by_device[dev] = {
+                'uid': uid,
+                'timestamp': dt,
+                'date': dt.date(),
+                'time': dt.strftime('%H:%M:%S'),
+                'device': dev,
+            }
+    if not latest_by_device:
+        return {}
+    uid_map = _uid_map()
+    for rec in latest_by_device.values():
+        emp = uid_map.get(rec['uid'])
+        rec['badge'] = emp['badge'] if emp else rec['uid']
+        rec['name'] = emp['name'] if emp else 'Unknown'
+        rec['dept'] = emp['dept'] if emp else '—'
+    return latest_by_device
+
+
 # ─── Live punch feed (punches since a given timestamp) ────────────────────────
 
 def get_live_punches_since(since_ts: datetime) -> list:

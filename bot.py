@@ -512,9 +512,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "<b>Database</b>\n"
         "/stats — MDB stats\n"
         "/mdbinfo — MDB path + file info\n"
+        "/dbstatus — MDB freshness monitor status\n"
         "/setmdb &lt;path&gt; — update MDB path\n"
         "/tables — list MDB tables (diagnostics)\n"
         "/download &lt;ip&gt; — read-only device snapshot (no MDB write)\n"
+        "/devicestatus — device health monitor (with refresh)\n"
         "/dbbackup — send a read-only MDB file copy\n"
         "/importcsv — upload CSV for validation/preview only\n"
         "/autonmap — suggest UID→badge matches only (not saved)\n"
@@ -1763,6 +1765,80 @@ async def cmd_latest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     for chunk in _split('\n'.join(lines)):
         await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
+def _dbstatus_text(snapshot: dict) -> str:
+    info = snapshot['mdb_info']
+    last = snapshot.get('last_punch')
+    status_label = snapshot['status'].title()
+    last_line = 'N/A'
+    if last:
+        last_line = (
+            f"{last['timestamp'].strftime('%d/%m/%Y %I:%M%p')} "
+            f"(Device: {last.get('device') or '—'})"
+        )
+    return (
+        "🗄️ <b>MDB Status</b>\n\n"
+        f"{snapshot['status_emoji']} <b>{status_label}</b>\n"
+        f"📂 MDB file: <code>{html.escape(str(info.get('configured_path') or 'N/A'))}</code>\n"
+        f"📦 Size: {info.get('size_mb')} MB\n"
+        f"🕐 Last punch: {last_line}\n"
+        f"⏳ Time since last punch: {snapshot.get('time_since', 'N/A')}\n"
+        f"⚙️ Stale threshold: {snapshot['stale_alert_hours']}h"
+    )
+
+
+def _devicestatus_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('🔄 Refresh', callback_data='dev:health_refresh')]
+    ])
+
+
+def _devicestatus_text(snapshots: list) -> str:
+    lines = ['📡 <b>Device Health Status</b>\n']
+    if not snapshots:
+        lines.append('No devices configured.')
+        return '\n'.join(lines)
+    for s in snapshots:
+        last = s.get('last_punch')
+        if last:
+            last_label = f"{last['timestamp'].strftime('%d/%m/%Y %I:%M%p')} ({s['time_since']} ago)"
+        else:
+            last_label = 'N/A'
+        detail = s['status_text']
+        if s['status'] == 'offline' and s.get('ping_error'):
+            detail += f" — {html.escape(str(s['ping_error'])[:80])}"
+        lines.append(
+            f"{s['status_emoji']} Device {html.escape(s['sensor_id'])} "
+            f"({html.escape(s['ip'])}) - {detail} | Last punch: {last_label}"
+        )
+    return '\n'.join(lines)
+
+
+async def cmd_dbstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    await update.message.reply_text('⏳ Checking MDB freshness...')
+    try:
+        snapshot = notifier.get_mdb_staleness_snapshot()
+        await update.message.reply_text(_dbstatus_text(snapshot), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+
+async def cmd_devicestatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    await update.message.reply_text('⏳ Checking device health...')
+    try:
+        snapshots = notifier.get_device_health_snapshot()
+        await update.message.reply_text(
+            _devicestatus_text(snapshots),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_devicestatus_kb(),
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
 
 
 # ── /livepunches — toggle live punch notifications ────────────────────────────
@@ -4017,6 +4093,15 @@ async def callback_device(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if action == 'health_refresh':
+        snapshots = notifier.get_device_health_snapshot()
+        await query.edit_message_text(
+            _devicestatus_text(snapshots),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_devicestatus_kb(),
+        )
+        return
+
     if action == 'add':
         _device_state[chat_id] = {
             'user_id': user_id,
@@ -5232,9 +5317,11 @@ def main():
         # DB
         ('stats',       cmd_stats),
         ('mdbinfo',     cmd_mdbinfo),
+        ('dbstatus',    cmd_dbstatus),
         ('setmdb',      cmd_setmdb),
         ('tables',      cmd_tables),
         ('download',    cmd_download),
+        ('devicestatus', cmd_devicestatus),
         ('dbbackup',    cmd_dbbackup),
         ('importcsv',   cmd_importcsv),
         ('autonmap',    cmd_autonmap),

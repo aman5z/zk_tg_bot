@@ -5,11 +5,17 @@ Reboot, clock sync, user sync, add user, device status, unknown UIDs.
 """
 
 import logging
+import platform
+import subprocess
 from datetime import datetime
 from typing import Optional
 from zk import ZK
 from zk.exception import ZKErrorResponse, ZKNetworkError
 import settings
+try:
+    from ping3 import ping as _ping3_ping
+except Exception:
+    _ping3_ping = None
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +62,33 @@ def check_device_connectivity(ip: str, port: int, timeout: Optional[int] = None)
                 conn.disconnect()
             except Exception:
                 pass
+
+
+def ping_device(ip: str, timeout_secs: Optional[int] = None) -> tuple:
+    """
+    Return (online, error_message) using ping3 with subprocess fallback.
+    """
+    timeout = max(1, int(timeout_secs or settings.get_ping_timeout_secs()))
+    if _ping3_ping:
+        try:
+            latency = _ping3_ping(ip, timeout=timeout)
+            if latency is not None:
+                return True, ''
+        except Exception as exc:
+            logger.debug(f"ping3 failed for {ip}: {exc}")
+
+    try:
+        if platform.system().lower().startswith('win'):
+            cmd = ['ping', '-n', '1', '-w', str(timeout * 1000), ip]
+        else:
+            cmd = ['ping', '-c', '1', '-W', str(timeout), ip]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 2)
+        if proc.returncode == 0:
+            return True, ''
+        err = (proc.stderr or proc.stdout or 'ping failed').strip()
+        return False, err.splitlines()[-1][:180]
+    except Exception as exc:
+        return False, str(exc)
 
 # ─── Device status ────────────────────────────────────────────────────────────
 

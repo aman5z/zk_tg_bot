@@ -372,8 +372,12 @@ Centralised runtime settings module. All components read and write shared config
 |----------|-------------|
 | `get_live_punches()` / `set_live_punches(val)` | Per-punch live Telegram notifications toggle. |
 | `get_device_timeout()` / `set_device_timeout(val)` | ZKTeco connection timeout in seconds. |
-| `get_devices()` | Returns the device list from `[devices]` as a list of `{ip, name, port, timeout}` dicts. |
+| `get_devices()` | Returns the device list from `[devices]` as a list of `{ip, name, sensor_id, port, timeout}` dicts. Supports legacy `ips/names` and `device_01=...` style keys. |
 | `save_devices(devices)` | Writes the full device list back to `[devices]` in `config.ini`. |
+| `get_stale_alert_hours()` / `set_stale_alert_hours(val)` | MDB stale-alert threshold in hours (`[monitoring] stale_alert_hours`). |
+| `get_stale_check_interval_mins()` / `set_stale_check_interval_mins(val)` | Scheduler interval for MDB/device stale checks (`[monitoring] stale_check_interval_mins`). |
+| `get_device_alert_hours()` / `set_device_alert_hours(val)` | Per-device stale threshold based on last SENSORID punch (`[devices] device_alert_hours`). |
+| `get_ping_timeout_secs()` / `set_ping_timeout_secs(val)` | Ping timeout for device health checks (`[devices] ping_timeout_secs`). |
 | `get_smtp_*` / `set_smtp_*` | Getters and setters for all SMTP settings (`enabled`, `daily_email_enabled`, `sender_email`, `sender_name`, `app_password`, `recipients`, `subject`, `format`). |
 
 ---
@@ -399,8 +403,12 @@ mount_point   = /mnt/attdb            # local mount point for UNC paths
 ips     = 10.20.141.21,10.20.141.22   # comma-separated ZKTeco device IPs
 names   = Girls 2,Boys 2              # human-readable names (same order as ips)
 ports   = 4370,4370                   # optional per-device ports (falls back to `port`)
+device_01 = 192.168.1.201             # optional SENSORID-keyed format (used when `ips` is empty)
+device_02 = 192.168.1.202
 port    = 4370                        # ZKTeco default port
 timeout = 10                          # connection timeout (seconds)
+device_alert_hours = 3                # alert if a reachable device has no new SENSORID punch for this many hours
+ping_timeout_secs  = 3                # ping timeout used by /devicestatus + scheduler monitor
 
 [departments]
 exclude = DELETED EMPLOYEES,TRANSPORT # departments excluded from reports
@@ -408,6 +416,10 @@ exclude = DELETED EMPLOYEES,TRANSPORT # departments excluded from reports
 [attendance]
 shift_start = 07:30                   # late-arrival threshold (HH:MM, 24h)
 checkin_window_mins = 30              # punches within this window from first punch are treated as check-in registration noise
+
+[monitoring]
+stale_alert_hours = 3                 # MDB stale if no new punch for this many hours
+stale_check_interval_mins = 30        # scheduler interval for MDB/device stale monitor
 
 [notifications]
 notify_punches       = 0              # 1 = send Telegram message per punch (noisy)
@@ -615,6 +627,7 @@ Summary status values:
 |---------|-------------|
 | `/device` | Admin-only device panel with live ping status, inline add/edit/remove/rename actions, config persistence, and audit logging |
 | `/devices` | Status of all ZKTeco devices (online/offline, user count, clock) |
+| `/devicestatus` | Device health monitor: ping + latest MDB SENSORID punch age per configured device, with inline refresh button |
 | `/clocksync` | Sync all device clocks to current system time |
 | `/reboot <ip or name>` | Reboot a single device |
 | `/usersync` | Sync users across all devices (push missing users to each device) |
@@ -627,6 +640,7 @@ Summary status values:
 |---------|-------------|
 | `/stats` | MDB accessibility, size, modification date, employee counts |
 | `/mdbinfo` | Configured and resolved MDB path with file metadata |
+| `/dbstatus` | MDB freshness monitor status: file path/size, last punch + device, age, and Fresh/Warning/Stale state |
 | `/setmdb <path>` | Update MDB path at runtime (no restart needed) |
 | `/tables` | List all tables in the MDB (diagnostic) |
 | `/download <ip>` | Read-only device snapshot + latest linked MDB punches (no write action) |
@@ -759,6 +773,8 @@ The `notifier.run_scheduler()` loop runs in the background as an asyncio task:
 | Trigger | Action |
 |---------|--------|
 | Every 5 minutes | Check all device online/offline states; alert in Telegram if any device changes state |
+| Every `stale_check_interval_mins` | Check MDB freshness (`/dbstatus` logic) and alert admins once per outage when stale threshold is crossed |
+| Every `stale_check_interval_mins` | Check each device ping + last SENSORID punch age (`/devicestatus` logic) and alert per-device without spam (re-alert only after recovery) |
 | Daily at 08:15 (configurable) | Send absent employee list as a text summary + XLSX attachment to Telegram |
 | Daily at 08:15 (configurable, optional) | If `[smtp] enabled = 1` and `daily_email_enabled = 1`, also send the absent report by email |
 | Configured backup time | If `[dbbackup] schedule_enabled = 1`, deliver MDB backup via configured method(s) |
