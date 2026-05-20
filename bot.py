@@ -3536,7 +3536,7 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def _resolve_employee_badge_or_name(update: Update, query_str: str):
     query = query_str.strip()
     if query.isdigit():
-        emps = mdb_reader.search_employee(query)
+        emps = mdb_reader.get_employees(active_only=False)
         emp = next((e for e in emps if e['badge'] == query), None)
         if not emp:
             await update.message.reply_text(f'❌ No employee found matching "{query}".')
@@ -3597,16 +3597,16 @@ async def cmd_employeereport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     today = date.today()
     first_day = today.replace(day=1)
     try:
-        emp = await _resolve_employee_badge_or_name(update, query_str)
-        if not emp:
+        resolved_emp = await _resolve_employee_badge_or_name(update, query_str)
+        if not resolved_emp:
             return
-        badge = emp['badge']
+        badge = resolved_emp['badge']
         await update.message.reply_text('⏳ Building employee report...')
         rep = mdb_reader.get_employee_report(badge, first_day, today)
-        emp = rep['employee']
+        report_emp = rep['employee']
         lines = [
             f"👤 <b>Employee Report</b>",
-            f"{emp['name']} ({emp['badge']}) — {emp['dept']}",
+            f"{report_emp['name']} ({report_emp['badge']}) — {report_emp['dept']}",
             f"📅 {first_day.strftime('%d/%m/%Y')} → {today.strftime('%d/%m/%Y')}",
             f"🕐 Shift start: {rep['shift_start']}",
             "",
