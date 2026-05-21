@@ -197,6 +197,28 @@ def set_checkin_window_mins(val: int):
     _save()
 
 
+# ─── Monitoring settings ───────────────────────────────────────────────────────
+
+def get_stale_alert_hours() -> int:
+    return max(1, _cfg.getint('monitoring', 'stale_alert_hours', fallback=3))
+
+
+def set_stale_alert_hours(val: int):
+    _ensure('monitoring')
+    _cfg['monitoring']['stale_alert_hours'] = str(max(1, int(val)))
+    _save()
+
+
+def get_stale_check_interval_mins() -> int:
+    return max(1, _cfg.getint('monitoring', 'stale_check_interval_mins', fallback=30))
+
+
+def set_stale_check_interval_mins(val: int):
+    _ensure('monitoring')
+    _cfg['monitoring']['stale_check_interval_mins'] = str(max(1, int(val)))
+    _save()
+
+
 # ─── Device settings ───────────────────────────────────────────────────────────
 
 def get_device_timeout() -> int:
@@ -209,9 +231,56 @@ def set_device_timeout(val: int):
     _save()
 
 
+def get_device_alert_hours() -> int:
+    return max(1, _cfg.getint('devices', 'device_alert_hours', fallback=3))
+
+
+def set_device_alert_hours(val: int):
+    _ensure('devices')
+    _cfg['devices']['device_alert_hours'] = str(max(1, int(val)))
+    _save()
+
+
+def get_ping_timeout_secs() -> int:
+    return max(1, _cfg.getint('devices', 'ping_timeout_secs', fallback=3))
+
+
+def set_ping_timeout_secs(val: int):
+    _ensure('devices')
+    _cfg['devices']['ping_timeout_secs'] = str(max(1, int(val)))
+    _save()
+
+
 def get_devices() -> list:
     _ensure('devices')
-    ips = [i.strip() for i in _cfg.get('devices', 'ips', fallback='').split(',')
+    ips_raw = _cfg.get('devices', 'ips', fallback='').strip()
+    device_items = [
+        (k, _cfg.get('devices', k, fallback='').strip())
+        for k in sorted(_cfg['devices'].keys())
+        if k.startswith('device_')
+    ]
+    if device_items and not ips_raw:
+        timeout = get_device_timeout()
+        default_port = _cfg.getint('devices', 'port', fallback=4370)
+        devices = []
+        for i, (key, ip) in enumerate(device_items):
+            if not ip:
+                continue
+            raw_sensor = key.split('_', 1)[1].strip() if '_' in key else ''
+            if raw_sensor.isdigit():
+                sensor_id = f'{int(raw_sensor):02d}'
+            else:
+                sensor_id = raw_sensor or f'{i + 1:02d}'
+            devices.append({
+                'ip': ip,
+                'name': f'Device {sensor_id}',
+                'sensor_id': sensor_id,
+                'port': default_port,
+                'timeout': timeout,
+            })
+        return devices
+
+    ips = [i.strip() for i in ips_raw.split(',')
            if i.strip()]
     names = [n.strip() for n in _cfg.get('devices', 'names', fallback='').split(',')
              if n.strip()]
@@ -230,6 +299,7 @@ def get_devices() -> list:
         devices.append({
             'ip': ip,
             'name': names[i] if i < len(names) else f'Device {i + 1}',
+            'sensor_id': f'{i + 1:02d}',
             'port': port,
             'timeout': timeout,
         })
@@ -257,6 +327,24 @@ def save_devices(devices: list):
 
 def get_chat_id() -> str:
     return _cfg.get('telegram', 'chat_id', fallback='').strip()
+
+
+def get_allowed_users() -> list:
+    raw = _cfg.get('telegram', 'allowed_users', fallback='').strip()
+    return [u.strip() for u in raw.split(',') if u.strip()]
+
+
+def get_admin_chat_ids() -> list:
+    all_ids = [get_chat_id()] + get_allowed_users()
+    unique = []
+    seen = set()
+    for cid in all_ids:
+        cid = str(cid).strip()
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        unique.append(cid)
+    return unique
 
 
 # ─── Summary helpers ──────────────────────────────────────────────────────────

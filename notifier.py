@@ -12,7 +12,7 @@ import logging
 import os
 import shutil
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from io import BytesIO
 from typing import Optional
 
@@ -42,6 +42,14 @@ async def _send(bot: Bot, text: str, parse_mode: str = 'HTML'):
         logger.error(f"Telegram send error: {e}")
 
 
+async def _send_admins(bot: Bot, text: str, parse_mode: str = 'HTML'):
+    for cid in settings.get_admin_chat_ids():
+        try:
+            await bot.send_message(chat_id=cid, text=text, parse_mode=parse_mode)
+        except TelegramError as e:
+            logger.error(f"Telegram send error to {cid}: {e}")
+
+
 async def _send_doc(bot: Bot, data: BytesIO, filename: str, caption: str = ''):
     try:
         data.seek(0)
@@ -57,6 +65,25 @@ async def _send_photo(bot: Bot, data: BytesIO, caption: str = ''):
         await bot.send_photo(chat_id=_chat_id(), photo=data, caption=caption)
     except TelegramError as e:
         logger.error(f"Telegram send_photo error: {e}")
+
+
+def _fmt_age(delta: timedelta) -> str:
+    total_seconds = max(0, int(delta.total_seconds()))
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, _ = divmod(rem, 60)
+    if days > 0:
+        return f'{days}d {hours}h {mins}m'
+    if hours > 0:
+        return f'{hours}h {mins}m'
+    return f'{mins}m'
+
+
+def _sensor_key(sensor_id: str) -> str:
+    sid = (sensor_id or '').strip()
+    if sid.isdigit():
+        return str(int(sid))
+    return sid.lower()
 
 
 # ─── Daily absent report ──────────────────────────────────────────────────────
@@ -176,6 +203,174 @@ async def send_daily_report(
 # ─── Device status monitor ────────────────────────────────────────────────────
 
 _last_device_status: dict = {}   # ip → online bool
+_mdb_stale_alert_active = False
+_device_health_alert_state: dict = {}   # ip -> {'offline': bool, 'stale': bool}
+
+
+def get_mdb_staleness_snapshot() -> dict:
+    info = mdb_reader.get_mdb_info()
+    last = None
+    if info.get('accessible'):
+        try:
+            last = mdb_reader.get_last_punch()
+        except Exception as e:
+            logger.warning(f"Unable to read last MDB punch: {e}")
+    stale_hours = settings.get_stale_alert_hours()
+    warn_hours = max(1.0, stale_hours / 2.0)
+    snapshot = {
+        'mdb_info': info,
+        'last_punch': last,
+        'stale_alert_hours': stale_hours,
+        'warning_hours': warn_hours,
+        'status': 'stale',
+        'status_emoji': '🔴',
+        'is_stale': True,
+        'time_since': 'N/A',
+        'age_hours': None,
+    }
+    if not info.get('accessible') or not last:
+        return snapshot
+    age = datetime.now() - last['timestamp']
+    age_hours = age.total_seconds() / 3600.0
+    snapshot['age_hours'] = age_hours
+    snapshot['time_since'] = _fmt_age(age)
+    if age_hours >= stale_hours:
+        snapshot['status'] = 'stale'
+        snapshot['status_emoji'] = '🔴'
+        snapshot['is_stale'] = True
+    elif age_hours >= warn_hours:
+        snapshot['status'] = 'warning'
+        snapshot['status_emoji'] = '🟡'
+        snapshot['is_stale'] = False
+    else:
+        snapshot['status'] = 'fresh'
+        snapshot['status_emoji'] = '🟢'
+        snapshot['is_stale'] = False
+    return snapshot
+
+
+def get_device_health_snapshot() -> list:
+    devices = settings.get_devices()
+    alert_hours = settings.get_device_alert_hours()
+    timeout = settings.get_ping_timeout_secs()
+    try:
+        by_sensor = mdb_reader.get_last_punch_per_device()
+    except Exception as e:
+        logger.warning(f"Unable to read per-device MDB punches: {e}")
+        by_sensor = {}
+    by_sensor_norm = {_sensor_key(k): v for k, v in by_sensor.items()}
+    now = datetime.now()
+    result = []
+    for idx, d in enumerate(devices, start=1):
+        sensor_id = (d.get('sensor_id') or f'{idx:02d}').strip()
+        sensor_norm = _sensor_key(sensor_id)
+        last = by_sensor_norm.get(sensor_norm)
+        online, err = zk_devices.ping_device(d['ip'], timeout_secs=timeout)
+        stale = False
+        age_hours = None
+        time_since = 'N/A'
+        if last:
+            age = now - last['timestamp']
+            age_hours = age.total_seconds() / 3600.0
+            time_since = _fmt_age(age)
+            stale = age_hours >= alert_hours
+        status = 'online'
+        status_text = 'Online'
+        icon = '🟢'
+        if not online:
+            status = 'offline'
+            status_text = 'Offline'
+            icon = '🔴'
+        elif stale:
+            status = 'stale'
+            status_text = 'Online but stale'
+            icon = '🟡'
+        result.append({
+            'sensor_id': sensor_id,
+            'name': d.get('name') or f'Device {sensor_id}',
+            'ip': d['ip'],
+            'online': online,
+            'ping_error': err,
+            'status': status,
+            'status_text': status_text,
+            'status_emoji': icon,
+            'last_punch': last,
+            'time_since': time_since,
+            'age_hours': age_hours,
+            'stale': stale,
+            'alert_hours': alert_hours,
+        })
+    return result
+
+
+async def check_mdb_staleness(bot: Bot):
+    global _mdb_stale_alert_active
+    try:
+        snap = get_mdb_staleness_snapshot()
+        if not snap['is_stale']:
+            _mdb_stale_alert_active = False
+            return
+        if _mdb_stale_alert_active:
+            return
+        info = snap['mdb_info']
+        last = snap['last_punch']
+        if last:
+            last_label = (
+                f"{last['timestamp'].strftime('%d/%m/%Y %I:%M%p')} "
+                f"(Device: {last.get('device') or '—'})"
+            )
+        else:
+            last_label = 'N/A'
+        msg = (
+            "⚠️ <b>MDB Staleness Alert</b>\n"
+            f"No new punches recorded in the last {snap['stale_alert_hours']} hours.\n"
+            f"Last punch: {last_label}\n"
+            f"MDB file: <code>{info.get('configured_path') or 'N/A'}</code>\n"
+            "Please check Middle East Attendance Software connection."
+        )
+        await _send_admins(bot, msg)
+        _mdb_stale_alert_active = True
+    except Exception as e:
+        logger.error(f"MDB staleness check error: {e}")
+
+
+async def check_device_health(bot: Bot):
+    try:
+        snapshots = get_device_health_snapshot()
+        for s in snapshots:
+            ip = s['ip']
+            prev = _device_health_alert_state.get(ip, {'offline': False, 'stale': False})
+            if s['status'] == 'offline':
+                if not prev.get('offline'):
+                    last = s.get('last_punch')
+                    ts = last.get('timestamp') if isinstance(last, dict) else None
+                    last_txt = ts.strftime('%d/%m/%Y %I:%M%p') if ts else 'N/A'
+                    await _send_admins(
+                        bot,
+                        f"⚠️ <b>Device {s['sensor_id']} ({s['ip']}) - Unreachable (ping failed)</b>\n"
+                        f"Last known punch: {last_txt}\n"
+                        "Please check device power and network connection."
+                    )
+                _device_health_alert_state[ip] = {'offline': True, 'stale': False}
+                continue
+            # Device reachable
+            if s['stale']:
+                if not prev.get('stale'):
+                    last = s.get('last_punch')
+                    ts = last.get('timestamp') if isinstance(last, dict) else None
+                    last_txt = ts.strftime('%d/%m/%Y %I:%M%p') if ts else 'N/A'
+                    await _send_admins(
+                        bot,
+                        f"⚠️ <b>Device {s['sensor_id']} ({s['ip']}) - Online but stale</b>\n"
+                        f"No new punches in the last {s['alert_hours']} hours.\n"
+                        f"Last known punch: {last_txt}\n"
+                        "Please check device/software sync."
+                    )
+                _device_health_alert_state[ip] = {'offline': False, 'stale': True}
+            else:
+                _device_health_alert_state[ip] = {'offline': False, 'stale': False}
+    except Exception as e:
+        logger.error(f"Device health check error: {e}")
 
 
 async def check_device_status_changes(bot: Bot):
@@ -342,6 +537,8 @@ async def run_scheduler(bot: Bot):
     backup_sent_today = None
     device_check_interval = 300   # 5 min
     last_device_check     = 0.0
+    last_mdb_stale_check  = 0.0
+    last_device_health_check = 0.0
 
     logger.info(
         f"Scheduler started. Daily report at "
@@ -357,6 +554,17 @@ async def run_scheduler(bot: Bot):
             if ts - last_device_check >= device_check_interval:
                 await check_device_status_changes(bot)
                 last_device_check = ts
+
+            # MDB staleness monitor
+            stale_check_interval = settings.get_stale_check_interval_mins() * 60
+            if ts - last_mdb_stale_check >= stale_check_interval:
+                await check_mdb_staleness(bot)
+                last_mdb_stale_check = ts
+
+            # Device health monitor (reachability + stale per SENSORID)
+            if ts - last_device_health_check >= stale_check_interval:
+                await check_device_health(bot)
+                last_device_health_check = ts
 
             # Live punches — every cycle
             await check_live_punches(bot)
