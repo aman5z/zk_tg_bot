@@ -127,6 +127,25 @@ def get_device_status() -> list:
         result.append(status)
     return result
 
+
+def get_device_attendance_logs(device: dict) -> list:
+    """
+    Fetch attendance logs from a single device.
+    Returns raw pyzk attendance objects; caller handles mapping/persistence.
+    """
+    conn = None
+    try:
+        conn, _ = _connect(device)
+        logs = conn.get_attendance() or []
+        return list(logs)
+    finally:
+        if conn:
+            try:
+                conn.enable_device()
+                conn.disconnect()
+            except Exception:
+                pass
+
 # ─── Clock sync ───────────────────────────────────────────────────────────────
 
 def sync_clocks() -> list:

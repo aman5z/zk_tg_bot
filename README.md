@@ -33,7 +33,7 @@ The bot connects to two data sources:
 
 | Source | Access | Purpose |
 |--------|--------|---------|
-| Middle East Attendance Software `.mdb` file | Read-only via `mdbtools` | Employee list, punch records, departments |
+| Middle East Attendance Software `.mdb` file | Read via `mdbtools`, attendance-only append via ODBC sync | Employee list, punch records, departments |
 | ZKTeco biometric devices (TCP/IP) | Read/Write via `pyzk` | Device status, clock sync, reboot, user management |
 
 All interaction happens through Telegram. Only the configured `chat_id` (and optional extra user IDs) are authorised to issue commands.
@@ -46,7 +46,7 @@ All interaction happens through Telegram. Only the configured `chat_id` (and opt
 Telegram user
      │
      ▼
-  bot.py  ──── mdb_reader.py  ──── MDB file (read-only, via mdbtools)
+  bot.py  ──── mdb_reader.py  ──── MDB file (read via mdbtools, attendance append via ODBC)
      │
      └────── zk_devices.py   ──── ZKTeco devices (TCP, via pyzk)
      │
@@ -56,7 +56,7 @@ Telegram user
 ```
 
 - `bot.py` is the entry point. It creates the `python-telegram-bot` Application, registers all command handlers, and launches the background scheduler.
-- `mdb_reader.py` wraps `mdb-export` (from `mdbtools`) to read employee, attendance, and department data.
+- `mdb_reader.py` wraps `mdb-export` (from `mdbtools`) to read employee/attendance/department data, and supports attendance-only CHECKINOUT inserts for safe device sync.
 - `zk_devices.py` opens TCP connections to each ZKTeco device using `pyzk`.
 - `notifier.py` runs as an async loop alongside the bot, firing scheduled messages.
 - `email_sender.py` is an **optional** Gmail SMTP module. It is disabled by default and does not affect any existing Telegram functionality.
@@ -112,7 +112,7 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_trend` | `/trend [days]` | Attendance trend over the last working days (default 14). |
 | `cmd_report` | `/report` | Triggers `notifier.send_daily_report()` on demand — sends today's absent list as an XLSX file. |
 | `cmd_search` | `/search <name or badge>` | Searches employee records by name or badge number (partial match, case-insensitive). Returns up to 20 results with active/inactive status. |
-| `cmd_punches` | `/punches <badge or name>` | Lists today's punch times for a specific employee, labelled `→ IN` / `← OUT` by order. |
+| `cmd_punches` | `/punches <badge or name>` | Lists today's punch times using ranked employee matching and canonical UID-based punch lookup. |
 | `cmd_employeereport` | `/employeereport <badge or name>` | Month-to-date read-only attendance report for one employee. |
 | `cmd_calendar` | `/calendar <badge or name> [YYYY-MM]` | Renders a full-month emoji calendar grid for an employee. Defaults to the current month. |
 | `cmd_device` | `/device` | Admin-only inline device panel. Shows live ping status for each configured device and lets admins add, edit, remove, or rename devices directly in `config.ini`. |
@@ -127,6 +127,8 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_setmdb` | `/setmdb <path>` | Updates the MDB path in `config.ini` at runtime and immediately tests accessibility. |
 | `cmd_tables` | `/tables` | Lists all tables in the MDB file (diagnostic). |
 | `cmd_download` | `/download <ip>` | Read-only device snapshot and recent linked MDB punches (no download/write action). |
+| `cmd_syncall` | `/syncall` | Admin-only attendance sync from all configured devices; appends attendance rows only into `CHECKINOUT` with duplicate checks. |
+| `cmd_syncdevice` | `/syncdevice <id\|ip\|name>` | Admin-only attendance sync for one configured device with the same attendance-only, duplicate-safe write policy. |
 | `cmd_dbbackup` | `/dbbackup` | MDB Backup panel — inline keyboard with Telegram download, mail, copy, and schedule options. |
 | `cmd_importcsv` | `/importcsv` | CSV validation/preview only (no MDB import). |
 | `cmd_autonmap` | `/autonmap` | Suggests UID→badge matches only (not persisted). |
@@ -372,7 +374,7 @@ Centralised runtime settings module. All components read and write shared config
 |----------|-------------|
 | `get_live_punches()` / `set_live_punches(val)` | Per-punch live Telegram notifications toggle. |
 | `get_device_timeout()` / `set_device_timeout(val)` | ZKTeco connection timeout in seconds. |
-| `get_devices()` | Returns the device list from `[devices]` as a list of `{ip, name, sensor_id, port, timeout}` dicts. Supports legacy `ips/names` and `device_01=...` style keys. |
+| `get_devices()` | Returns the device list from `[devices]` as a list of `{ip, name, sensor_id, port, timeout}` dicts. Supports `ips` comma lists, `ips` IP ranges like `10.20.141.21-10.20.141.29`, and legacy `device_01=...` keys. |
 | `save_devices(devices)` | Writes the full device list back to `[devices]` in `config.ini`. |
 | `get_stale_alert_hours()` / `set_stale_alert_hours(val)` | MDB stale-alert threshold in hours (`[monitoring] stale_alert_hours`). |
 | `get_stale_check_interval_mins()` / `set_stale_check_interval_mins(val)` | Scheduler interval for MDB/device stale checks (`[monitoring] stale_check_interval_mins`). |
@@ -400,7 +402,7 @@ smb_domain    = WORKGROUP
 mount_point   = /mnt/attdb            # local mount point for UNC paths
 
 [devices]
-ips     = 10.20.141.21,10.20.141.22   # comma-separated ZKTeco device IPs
+ips     = 10.20.141.21-10.20.141.29   # supports comma list and range expansion
 names   = Girls 2,Boys 2              # human-readable names (same order as ips)
 ports   = 4370,4370                   # optional per-device ports (falls back to `port`)
 device_01 = 192.168.1.201             # optional SENSORID-keyed format (used when `ips` is empty)
@@ -617,7 +619,7 @@ Summary status values:
 | Command | Description |
 |---------|-------------|
 | `/search <name or badge>` | Search employees by name or badge (partial match) |
-| `/punches <badge or name>` | Today's punch times for one employee, labelled IN/OUT |
+| `/punches <badge or name>` | Today's punch times with ranked employee resolution (exact code/badge/name first, then startswith/token, then contains) |
 | `/employeereport <badge or name>` | Month-to-date read-only attendance report for one employee |
 | `/calendar <badge or name> [YYYY-MM]` | Monthly emoji attendance calendar for one employee |
 
@@ -644,6 +646,8 @@ Summary status values:
 | `/setmdb <path>` | Update MDB path at runtime (no restart needed) |
 | `/tables` | List all tables in the MDB (diagnostic) |
 | `/download <ip>` | Read-only device snapshot + latest linked MDB punches (no write action) |
+| `/syncall` | Admin-only attendance import from all configured devices into `CHECKINOUT` (duplicate-safe, attendance-only) |
+| `/syncdevice <id\|ip\|name>` | Admin-only attendance import for one configured device (same safety rules as `/syncall`) |
 | `/dbbackup` | MDB Backup panel — Telegram download (if ≤49 MB), mail backup, copy to directory, or configure a recurring schedule |
 | `/importcsv` | Validate/preview uploaded CSV only; does not import into MDB |
 | `/autonmap` | Show UID→badge mapping suggestions only; does not persist |
@@ -785,7 +789,8 @@ Report timing is configurable via `/editdaily`. Email delivery is configurable v
 
 ## Notes & Caveats
 
-- **MDB is read-only.** Middle East Attendance Software remains the single source of truth. The bot never writes to the database.
+- **System of record policy.** Middle East Attendance Software remains the owner for employee/device/department/timetable management.
+- **Attendance-only MDB writes.** `/syncall` and `/syncdevice` append records to `CHECKINOUT` only, with duplicate checks (`USERID` + `CHECKTIME` + `SENSORID` when available). The bot never edits/deletes existing punches and never writes employee/device/department metadata.
 - **Read-only adaptations.** `/importcsv`, `/autonmap`, `/download`, `/syncrange`, `/shifts`, and `/workdays` are implemented as read-only Telegram views/previews only; they do not persist changes.
 - **Backups are file copies only.** `/dbbackup` creates a timestamped copy of the MDB file; it never mutates the original. The backup panel offers Telegram download (≤49 MB), email with attachment, local directory copy, and recurring scheduled delivery.
 - **Device user writes.** `/adduser` and `/usersync` write to ZKTeco devices only. Middle East Software picks up new users on its next "Download User Info" sync.

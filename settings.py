@@ -251,6 +251,40 @@ def set_ping_timeout_secs(val: int):
     _save()
 
 
+def _expand_device_ips(raw: str) -> list:
+    items = []
+    for token in [t.strip() for t in (raw or '').split(',') if t.strip()]:
+        if '-' not in token:
+            items.append(token)
+            continue
+        left, right = token.split('-', 1)
+        left = left.strip()
+        right = right.strip()
+        if not left or not right:
+            items.append(token)
+            continue
+        left_parts = left.split('.')
+        right_parts = right.split('.')
+        if len(left_parts) != 4 or len(right_parts) != 4:
+            items.append(token)
+            continue
+        if left_parts[:3] != right_parts[:3]:
+            items.append(token)
+            continue
+        try:
+            start = int(left_parts[3])
+            end = int(right_parts[3])
+        except ValueError:
+            items.append(token)
+            continue
+        if start <= end:
+            base = '.'.join(left_parts[:3])
+            items.extend([f'{base}.{i}' for i in range(start, end + 1)])
+        else:
+            items.append(token)
+    return items
+
+
 def get_devices() -> list:
     _ensure('devices')
     ips_raw = _cfg.get('devices', 'ips', fallback='').strip()
@@ -280,8 +314,7 @@ def get_devices() -> list:
             })
         return devices
 
-    ips = [i.strip() for i in ips_raw.split(',')
-           if i.strip()]
+    ips = _expand_device_ips(ips_raw)
     names = [n.strip() for n in _cfg.get('devices', 'names', fallback='').split(',')
              if n.strip()]
     default_port = _cfg.getint('devices', 'port', fallback=4370)

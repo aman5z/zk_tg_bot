@@ -11,9 +11,14 @@ import os
 import subprocess
 import configparser
 import logging
+import time
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 from typing import Optional
+try:
+    import pyodbc
+except ImportError:
+    pyodbc = None
 
 logger = logging.getLogger(__name__)
 DEFAULT_SHIFT_START = '07:30'
@@ -201,6 +206,68 @@ def search_employee(query: str) -> list:
     q = query.lower().strip()
     return [e for e in get_employees(active_only=False)
             if q in e['name'].lower() or q in e['badge'].lower()]
+
+
+def _norm_text(value: str) -> str:
+    return ' '.join((value or '').strip().lower().split())
+
+
+def rank_employee_matches(query: str, employees: Optional[list] = None) -> list:
+    """
+    Deterministic employee match ranking used by /punches and related lookups.
+    Returns a sorted list of employee dicts with an added transient key "_rank".
+    """
+    q_raw = (query or '').strip()
+    if not q_raw:
+        return []
+    q_norm = _norm_text(q_raw)
+    q_is_numeric = q_raw.isdigit()
+    emps = employees if employees is not None else get_employees(active_only=False)
+
+    ranked = []
+    for e in emps:
+        badge = str(e.get('badge', '')).strip()
+        uid = str(e.get('uid', '')).strip()
+        name = str(e.get('name', '')).strip()
+        name_norm = _norm_text(name)
+        tokens = [t for t in name_norm.split(' ') if t]
+        rank = None
+
+        if q_is_numeric:
+            if badge == q_raw:
+                rank = 1
+            elif uid == q_raw:
+                rank = 2
+            elif badge.startswith(q_raw):
+                rank = 3
+            elif uid.startswith(q_raw):
+                rank = 4
+        else:
+            if _norm_text(uid) == q_norm:
+                rank = 1
+            elif _norm_text(badge) == q_norm:
+                rank = 2
+            elif name_norm == q_norm:
+                rank = 3
+            elif name_norm.startswith(q_norm):
+                rank = 4
+            elif any(t.startswith(q_norm) for t in tokens):
+                rank = 5
+            elif q_norm in name_norm:
+                rank = 6
+
+        if rank is not None:
+            candidate = dict(e)
+            candidate['_rank'] = rank
+            ranked.append(candidate)
+
+    ranked.sort(key=lambda e: (
+        e.get('_rank', 99),
+        len(str(e.get('name', ''))),
+        str(e.get('name', '')).lower(),
+        str(e.get('badge', '')),
+    ))
+    return ranked
 
 # ─── Attendance ───────────────────────────────────────────────────────────────
 
@@ -516,6 +583,157 @@ def get_db_stats() -> dict:
 
 def get_employee_punches(badge: str, date_from: date, date_to: date) -> list:
     return get_attendance(date_from, date_to, badge=badge)
+
+
+def _connect_mdb_write():
+    if pyodbc is None:
+        raise RuntimeError(
+            "pyodbc is required for MDB attendance sync writes. Install pyodbc and an MDB-capable ODBC driver."
+        )
+    mdb = _resolve_local_path()
+    if not mdb:
+        raise RuntimeError("MDB not accessible. Check /mdbinfo or use /setmdb.")
+    drivers = [d for d in pyodbc.drivers()]
+    candidates = []
+    if 'Microsoft Access Driver (*.mdb, *.accdb)' in drivers:
+        candidates.append(f'DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={mdb};')
+    if 'MDBTools' in drivers:
+        candidates.append(f'DRIVER={{MDBTools}};DBQ={mdb};')
+    candidates.extend([
+        f'DRIVER={{Microsoft Access Driver (*.mdb)}};DBQ={mdb};',
+        f'DRIVER={{MDBTools}};DBQ={mdb};',
+    ])
+
+    last_err = None
+    for conn_str in candidates:
+        try:
+            return pyodbc.connect(conn_str, autocommit=False)
+        except Exception as exc:
+            last_err = exc
+            continue
+    raise RuntimeError(f"Unable to open MDB for writes via ODBC: {last_err}")
+
+
+def _is_mdb_lock_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        'already in use' in msg
+        or 'could not lock file' in msg
+        or 'database is locked' in msg
+        or 'file sharing lock count exceeded' in msg
+        or ('lock' in msg and ('database' in msg or '.ldb' in msg or '.laccdb' in msg))
+    )
+
+
+def _checkinout_columns(cur) -> set:
+    cols = {str(c.column_name).upper() for c in cur.columns(table='CHECKINOUT') if c.column_name}
+    if not cols:
+        raise RuntimeError("Unable to discover CHECKINOUT columns via ODBC metadata.")
+    return cols
+
+
+def _event_dedupe_fields(columns: set, event: dict) -> tuple:
+    fields = []
+    params = []
+    userid = str(event.get('userid', '')).strip()
+    checktime = event.get('checktime')
+    sensorid = str(event.get('sensorid', '')).strip()
+    if not userid or not checktime:
+        return (), ()
+    if 'USERID' in columns:
+        fields.append('USERID = ?')
+        params.append(userid)
+    if 'CHECKTIME' in columns:
+        fields.append('CHECKTIME = ?')
+        params.append(checktime)
+    if 'SENSORID' in columns and sensorid:
+        fields.append('SENSORID = ?')
+        params.append(sensorid)
+    return tuple(fields), tuple(params)
+
+
+def _build_insert_payload(columns: set, event: dict) -> list:
+    userid = str(event.get('userid', '')).strip()
+    checktime = event.get('checktime')
+    sensorid = str(event.get('sensorid', '')).strip()
+    if not userid or not checktime:
+        return []
+    payload = []
+    if 'USERID' in columns:
+        payload.append(('USERID', userid))
+    if 'CHECKTIME' in columns:
+        payload.append(('CHECKTIME', checktime))
+    if 'SENSORID' in columns and sensorid:
+        payload.append(('SENSORID', sensorid))
+    if 'CHECKTYPE' in columns:
+        payload.append(('CHECKTYPE', str(event.get('checktype', 'I') or 'I')))
+    if 'VERIFYCODE' in columns:
+        payload.append(('VERIFYCODE', int(event.get('verifycode', 0) or 0)))
+    if 'MEMOINFO' in columns:
+        payload.append(('MEMOINFO', str(event.get('memoinfo', '') or '')))
+    if 'WORKCODE' in columns:
+        payload.append(('WORKCODE', int(event.get('workcode', 0) or 0)))
+    if 'SN' in columns:
+        payload.append(('SN', str(event.get('sn', '') or '')))
+    if 'USEREXTFMT' in columns:
+        payload.append(('USEREXTFMT', str(event.get('userextfmt', '') or '')))
+    return payload
+
+
+def insert_attendance_events(events: list, retries: int = 3, backoff_secs: float = 1.0) -> dict:
+    """
+    Insert attendance events into CHECKINOUT only (append-only).
+    Duplicate-safe using USERID + CHECKTIME + SENSORID (if available in schema/event).
+    Never updates/deletes existing records.
+    """
+    if not events:
+        return {'inserted': 0, 'duplicates': 0}
+
+    attempt = 0
+    while attempt < max(1, int(retries)):
+        conn = None
+        try:
+            conn = _connect_mdb_write()
+            cur = conn.cursor()
+            cols = _checkinout_columns(cur)
+            inserted = 0
+            duplicates = 0
+            for event in events:
+                payload = _build_insert_payload(cols, event)
+                if not payload:
+                    continue
+                where_fields, where_params = _event_dedupe_fields(cols, event)
+                if where_fields:
+                    sql_exists = f"SELECT COUNT(1) FROM CHECKINOUT WHERE {' AND '.join(where_fields)}"
+                    cur.execute(sql_exists, where_params)
+                    existing = cur.fetchone()
+                    if existing and int(existing[0]) > 0:
+                        duplicates += 1
+                        continue
+                cols_sql = ', '.join(f'[{k}]' for k, _ in payload)
+                vals_sql = ', '.join('?' for _ in payload)
+                cur.execute(f"INSERT INTO CHECKINOUT ({cols_sql}) VALUES ({vals_sql})",
+                            [v for _, v in payload])
+                inserted += 1
+            conn.commit()
+            return {'inserted': inserted, 'duplicates': duplicates}
+        except Exception as exc:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            if _is_mdb_lock_error(exc) and attempt < max(1, int(retries)) - 1:
+                time.sleep(max(0.2, float(backoff_secs)) * (attempt + 1))
+                attempt += 1
+                continue
+            raise RuntimeError(f"Attendance write failed: {exc}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 
 # ─── Latest punches per device (SENSORID) ────────────────────────────────────
