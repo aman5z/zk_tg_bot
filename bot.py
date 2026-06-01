@@ -29,6 +29,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
 from telegram.constants import ParseMode
 
 import mdb_reader
+import attendance_sync
 import zk_devices
 import notifier
 import settings
@@ -516,6 +517,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/setmdb &lt;path&gt; — update MDB path\n"
         "/tables — list MDB tables (diagnostics)\n"
         "/download &lt;ip&gt; — read-only device snapshot (no MDB write)\n"
+        "/syncall — import attendance logs from all configured devices into MDB\n"
+        "/syncdevice &lt;id|ip&gt; — import attendance logs from one configured device\n"
         "/devicestatus — device health monitor (with refresh)\n"
         "/dbbackup — send a read-only MDB file copy\n"
         "/importcsv — upload CSV for validation/preview only\n"
@@ -3611,25 +3614,19 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _resolve_employee_badge_or_name(update: Update, query_str: str):
     query = query_str.strip()
-    if query.isdigit():
-        emps = mdb_reader.get_employees(active_only=False)
-        emp = next((e for e in emps if e['badge'] == query), None)
-        if not emp:
-            await update.message.reply_text(f'❌ No employee found matching "{query}".')
-            return None
-        return emp
-
-    emps = mdb_reader.search_employee(query)
-    if not emps:
+    ranked = mdb_reader.rank_employee_matches(query)
+    if not ranked:
         await update.message.reply_text(f'❌ No employee found matching "{query}".')
         return None
-    if len(emps) > 1:
+    top_rank = ranked[0].get('_rank', 99)
+    top_matches = [e for e in ranked if e.get('_rank', 99) == top_rank]
+    if len(top_matches) > 1:
         lines = [f'⚠️ Multiple matches for "<b>{html.escape(query)}</b>". Please use badge number:\n']
-        for e in emps[:10]:
+        for e in top_matches[:10]:
             lines.append(f"[{e['badge']}] {html.escape(e['name'])} — {html.escape(e['dept'])}")
         await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
         return None
-    return emps[0]
+    return top_matches[0]
 
 
 async def cmd_punches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3640,15 +3637,16 @@ async def cmd_punches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Usage: /punches &lt;badge or name&gt;',
                                         parse_mode=ParseMode.HTML)
         return
-    query_str = ctx.args[0].strip()
+    query_str = ' '.join(ctx.args).strip()
     try:
         emp = await _resolve_employee_badge_or_name(update, query_str)
         if not emp:
             return
         badge = emp['badge']
+        uid = emp.get('uid')
         name = emp['name']
         today = date.today()
-        punches = mdb_reader.get_employee_punches(badge, today, today)
+        punches = mdb_reader.get_attendance(today, today, uid=uid) if uid else []
         if not punches:
             await update.message.reply_text(f'No punches today for {name} ({badge})')
             return
@@ -3657,6 +3655,57 @@ async def cmd_punches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             direction = '→ IN' if i % 2 == 1 else '← OUT'
             lines.append(f"{i}. {p['time']} {direction}")
         await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+
+def _fmt_sync_summary(summary: dict, title: str) -> str:
+    lines = [f"🔄 <b>{title}</b>"]
+    lines.append(f"Devices contacted: {summary.get('devices_contacted', 0)}")
+    lines.append(f"Records fetched: {summary.get('records_fetched', 0)}")
+    lines.append(f"Inserted: {summary.get('inserted', 0)}")
+    lines.append(f"Skipped duplicates: {summary.get('duplicates', 0)}")
+    failed = summary.get('failed', [])
+    if failed:
+        lines.append("")
+        lines.append("<b>Failed devices:</b>")
+        for f in failed[:10]:
+            err = html.escape(str(f.get('error', 'error'))[:140])
+            lines.append(f"• {html.escape(f.get('name') or f.get('ip') or 'unknown')} ({html.escape(f.get('ip', ''))}) — {err}")
+    return '\n'.join(lines)
+
+
+async def cmd_syncall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    await update.message.reply_text('⏳ Syncing attendance from all configured devices...')
+    try:
+        summary = attendance_sync.sync_all_devices()
+        await update.message.reply_text(
+            _fmt_sync_summary(summary, 'Attendance Sync — All Devices'),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ {e}')
+
+
+async def cmd_syncdevice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    if not ctx.args:
+        await update.message.reply_text(
+            'Usage: /syncdevice &lt;id|ip|name&gt;\nExample: /syncdevice 10.20.141.21',
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    selector = ' '.join(ctx.args).strip()
+    await update.message.reply_text(f'⏳ Syncing attendance for {html.escape(selector)}...')
+    try:
+        summary = attendance_sync.sync_one_device(selector)
+        await update.message.reply_text(
+            _fmt_sync_summary(summary, f'Attendance Sync — {html.escape(selector)}'),
+            parse_mode=ParseMode.HTML
+        )
     except Exception as e:
         await update.message.reply_text(f'❌ {e}')
 
@@ -5321,6 +5370,8 @@ def main():
         ('setmdb',      cmd_setmdb),
         ('tables',      cmd_tables),
         ('download',    cmd_download),
+        ('syncall',     cmd_syncall),
+        ('syncdevice',  cmd_syncdevice),
         ('devicestatus', cmd_devicestatus),
         ('dbbackup',    cmd_dbbackup),
         ('importcsv',   cmd_importcsv),
