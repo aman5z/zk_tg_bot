@@ -17,7 +17,7 @@ from calendar import monthrange
 from typing import Optional
 try:
     import pyodbc
-except Exception:
+except ImportError:
     pyodbc = None
 
 logger = logging.getLogger(__name__)
@@ -621,7 +621,7 @@ def _is_mdb_lock_error(exc: Exception) -> bool:
         or 'could not lock file' in msg
         or 'database is locked' in msg
         or 'file sharing lock count exceeded' in msg
-        or 'lock' in msg and 'file' in msg
+        or ('lock' in msg and ('database' in msg or '.ldb' in msg or '.laccdb' in msg))
     )
 
 

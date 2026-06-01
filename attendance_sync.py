@@ -10,17 +10,20 @@ import mdb_reader
 import settings
 import zk_devices
 
+DEFAULT_CHECKTYPE = 'I'
+
 
 def _normalize_event(log, device: dict) -> Optional[dict]:
     ts = getattr(log, 'timestamp', None)
     user_id = str(getattr(log, 'user_id', '') or '').strip()
     if not user_id or not isinstance(ts, datetime):
         return None
+    punch_val = getattr(log, 'punch', None)
     return {
         'userid': user_id,
         'checktime': ts,
         'sensorid': str(device.get('sensor_id', '') or ''),
-        'checktype': getattr(log, 'punch', None) if getattr(log, 'punch', None) is not None else 'I',
+        'checktype': punch_val if punch_val is not None else DEFAULT_CHECKTYPE,
         'verifycode': int(getattr(log, 'status', 0) or 0),
         'workcode': int(getattr(log, 'workcode', 0) or 0),
         'sn': str(device.get('ip', '') or ''),

@@ -3634,7 +3634,7 @@ async def cmd_punches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _allowed(update):
         return await _deny(update)
     if not ctx.args:
-        await update.message.reply_text('Usage: /punches &lt;badge or name&gt;',
+        await update.message.reply_text('Usage: /punches &lt;badge or full name&gt;',
                                         parse_mode=ParseMode.HTML)
         return
     query_str = ' '.join(ctx.args).strip()
@@ -3671,7 +3671,17 @@ def _fmt_sync_summary(summary: dict, title: str) -> str:
         lines.append("<b>Failed devices:</b>")
         for f in failed[:10]:
             err = html.escape(str(f.get('error', 'error'))[:140])
-            lines.append(f"• {html.escape(f.get('name') or f.get('ip') or 'unknown')} ({html.escape(f.get('ip', ''))}) — {err}")
+            name = (f.get('name') or '').strip()
+            ip = (f.get('ip') or '').strip()
+            if name and ip:
+                label = f"{html.escape(name)} ({html.escape(ip)})"
+            elif ip:
+                label = html.escape(ip)
+            elif name:
+                label = html.escape(name)
+            else:
+                label = 'unknown'
+            lines.append(f"• {label} — {err}")
     return '\n'.join(lines)
 
 
