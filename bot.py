@@ -1891,6 +1891,7 @@ _ALERT_TOGGLE_META = {
     ),
 }
 _ALERT_TOGGLE_ORDER = ['punches', 'device_status', 'device_stale', 'mdb_stale']
+_ALERT_LABEL_WIDTH = max(len(_ALERT_TOGGLE_META[k][0]) for k in _ALERT_TOGGLE_ORDER) + 2
 
 
 def _alert_states() -> dict:
@@ -1905,7 +1906,7 @@ def _alert_settings_text(states: dict) -> str:
     for key in _ALERT_TOGGLE_ORDER:
         label = _ALERT_TOGGLE_META[key][0]
         state = 'ON' if states.get(key) else 'OFF'
-        lines.append(f'{label:<28} <b>{state}</b>')
+        lines.append(f'{label:<{_ALERT_LABEL_WIDTH}}<b>{state}</b>')
     return '\n'.join(lines)
 
 
