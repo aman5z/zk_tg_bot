@@ -498,6 +498,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/unknown — users on devices not in MDB\n\n"
         "<b>Settings</b>\n"
         "/livepunches — toggle live punch notifications on/off\n"
+        "/alerts — toggle all alert notifications on/off\n"
         "/editreport — configure on-demand /report settings\n"
         "/editdaily — configure scheduled daily report settings\n"
         "/editemail — configure Gmail SMTP email delivery, send time, and days (optional)\n"
@@ -1861,6 +1862,105 @@ async def cmd_livepunches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Use /livepunches again to toggle.",
         parse_mode=ParseMode.HTML
     )
+
+
+_ALERT_TOGGLE_META = {
+    'punches': (
+        'Live punch notifications',
+        settings.get_live_punches,
+        settings.set_live_punches,
+        'Live punch notifications',
+    ),
+    'device_status': (
+        'Device online/offline',
+        settings.get_notify_device_status,
+        settings.set_notify_device_status,
+        'Device online/offline alerts',
+    ),
+    'device_stale': (
+        'Device stale (sync lag)',
+        settings.get_notify_device_stale,
+        settings.set_notify_device_stale,
+        'Device stale alerts',
+    ),
+    'mdb_stale': (
+        'MDB stale (no new punches)',
+        settings.get_notify_mdb_stale,
+        settings.set_notify_mdb_stale,
+        'MDB stale alerts',
+    ),
+}
+_ALERT_TOGGLE_ORDER = ['punches', 'device_status', 'device_stale', 'mdb_stale']
+_ALERT_LABEL_WIDTH = max(len(_ALERT_TOGGLE_META[k][0]) for k in _ALERT_TOGGLE_ORDER) + 2
+
+
+def _alert_states() -> dict:
+    return {k: bool(_ALERT_TOGGLE_META[k][1]()) for k in _ALERT_TOGGLE_ORDER}
+
+
+def _alert_settings_text(states: dict) -> str:
+    lines = [
+        '🔔 <b>Alert Settings</b>',
+        '',
+    ]
+    for key in _ALERT_TOGGLE_ORDER:
+        label = _ALERT_TOGGLE_META[key][0]
+        state = 'ON' if states.get(key) else 'OFF'
+        lines.append(f'{label:<{_ALERT_LABEL_WIDTH}}<b>{state}</b>')
+    return '\n'.join(lines)
+
+
+def _alert_settings_kb(states: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for key in _ALERT_TOGGLE_ORDER:
+        enabled = bool(states.get(key))
+        rows.append([
+            InlineKeyboardButton('✅ ON' if enabled else 'ON', callback_data=f'alert:toggle:{key}:1'),
+            InlineKeyboardButton('✅ OFF' if not enabled else 'OFF', callback_data=f'alert:toggle:{key}:0'),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_alerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _allowed(update):
+        return await _deny(update)
+    states = _alert_states()
+    await update.message.reply_text(
+        _alert_settings_text(states),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_alert_settings_kb(states),
+    )
+
+
+async def cb_alert_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _allowed(update):
+        await query.answer('⛔ Unauthorized.', show_alert=True)
+        return
+    data = query.data or ''
+    parts = data.split(':')
+    if len(parts) != 4 or parts[1] != 'toggle':
+        await query.answer('Invalid alert action.', show_alert=True)
+        return
+
+    _, _, key, raw_val = parts
+    meta = _ALERT_TOGGLE_META.get(key)
+    if meta is None or raw_val not in {'0', '1'}:
+        await query.answer('Invalid alert option.', show_alert=True)
+        return
+
+    _, getter, setter, toast_label = meta
+    target = raw_val == '1'
+    current = bool(getter())
+    if current != target:
+        setter(target)
+        states = _alert_states()
+        await query.edit_message_text(
+            _alert_settings_text(states),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_alert_settings_kb(states),
+        )
+    await query.answer(f"{toast_label}: {'ON' if target else 'OFF'}")
 
 
 # ── Edit settings helpers ─────────────────────────────────────────────────────
@@ -5360,6 +5460,7 @@ def main():
         ('unknown',     cmd_unknown_users),
         # Settings
         ('livepunches', cmd_livepunches),
+        ('alerts',      cmd_alerts),
         ('editreport',  cmd_editreport),
         ('editdaily',   cmd_editdaily),
         ('editemail',   cmd_editemail),
@@ -5397,6 +5498,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_edit,
                                          pattern=r'^(er:|ed:|ee:)'))
     app.add_handler(CallbackQueryHandler(callback_admin, pattern=r'^adm:'))
+    app.add_handler(CallbackQueryHandler(cb_alert_toggle, pattern=r'^alert:'))
     app.add_handler(CallbackQueryHandler(callback_device, pattern=r'^dev:'))
     app.add_handler(CallbackQueryHandler(callback_dbbackup, pattern=r'^bk:'))
     app.add_handler(CallbackQueryHandler(callback_timings, pattern=r'^tm:'))

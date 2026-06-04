@@ -328,7 +328,8 @@ async def check_mdb_staleness(bot: Bot):
             f"MDB file: <code>{info.get('configured_path') or 'N/A'}</code>\n"
             "Please check Middle East Attendance Software connection."
         )
-        await _send_admins(bot, msg)
+        if settings.get_notify_mdb_stale():
+            await _send_admins(bot, msg)
         _mdb_stale_alert_active = True
     except Exception as e:
         logger.error(f"MDB staleness check error: {e}")
@@ -359,13 +360,14 @@ async def check_device_health(bot: Bot):
                     last = s.get('last_punch')
                     ts = last.get('timestamp') if isinstance(last, dict) else None
                     last_txt = ts.strftime('%d/%m/%Y %I:%M%p') if ts else 'N/A'
-                    await _send_admins(
-                        bot,
-                        f"⚠️ <b>Device {s['sensor_id']} ({s['ip']}) - Online but stale</b>\n"
-                        f"No new punches in the last {s['alert_hours']} hours.\n"
-                        f"Last known punch: {last_txt}\n"
-                        "Please check device/software sync."
-                    )
+                    if settings.get_notify_device_stale():
+                        await _send_admins(
+                            bot,
+                            f"⚠️ <b>Device {s['sensor_id']} ({s['ip']}) - Online but stale</b>\n"
+                            f"No new punches in the last {s['alert_hours']} hours.\n"
+                            f"Last known punch: {last_txt}\n"
+                            "Please check device/software sync."
+                        )
                 _device_health_alert_state[ip] = {'offline': False, 'stale': True}
             else:
                 _device_health_alert_state[ip] = {'offline': False, 'stale': False}
@@ -379,6 +381,7 @@ async def check_device_status_changes(bot: Bot):
     This runs unconditionally — device monitoring is always enabled.
     """
     try:
+        notify_status = settings.get_notify_device_status()
         statuses = zk_devices.get_device_status()
         for s in statuses:
             ip          = s['ip']
@@ -391,14 +394,15 @@ async def check_device_status_changes(bot: Bot):
                 continue
 
             if prev_online != now_online:
-                icon  = '🟢' if now_online else '🔴'
-                state = 'ONLINE' if now_online else 'OFFLINE'
-                await _send(
-                    bot,
-                    f"{icon} <b>Device {state}</b>\n"
-                    f"📍 {name} ({ip})\n"
-                    f"🕐 {datetime.now().strftime('%H:%M:%S')}"
-                )
+                if notify_status:
+                    icon  = '🟢' if now_online else '🔴'
+                    state = 'ONLINE' if now_online else 'OFFLINE'
+                    await _send(
+                        bot,
+                        f"{icon} <b>Device {state}</b>\n"
+                        f"📍 {name} ({ip})\n"
+                        f"🕐 {datetime.now().strftime('%H:%M:%S')}"
+                    )
                 _last_device_status[ip] = now_online
     except Exception as e:
         logger.error(f"Device status check error: {e}")

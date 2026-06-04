@@ -138,6 +138,7 @@ All handlers check `_allowed()` before acting. They call into `mdb_reader` or `z
 | `cmd_mail` | `/mail` | Interactive prompt to send an attendance report by email — choose **Today** or **Pick Date** (calendar picker). Requires SMTP to be enabled via `/editemail`. |
 | `cmd_latest` | `/latest` | Pings all devices and shows the last 2 MDB punches per device (grouped by SENSORID), plus MDB last-modified time. |
 | `cmd_livepunches` | `/livepunches` | Toggles per-punch live Telegram notifications on/off. Persists to `config.ini` via `settings`. |
+| `cmd_alerts` | `/alerts` | Admin-only inline panel to toggle punch/device/MDB alert notifications on or off. |
 | `cmd_editreport` | `/editreport` | Interactive inline panel — configure on-demand `/report` settings (departments, format, template, save directory). |
 | `cmd_editdaily` | `/editdaily` | Interactive inline panel — configure scheduled daily report settings (time, days, departments, format, template, save directory). |
 | `cmd_admin` | `/admin` | Opens the admin inline keyboard panel (Shell, SQL, Audit, Presence, Config, Users, Device, Notice). |
@@ -373,6 +374,9 @@ Centralised runtime settings module. All components read and write shared config
 | Function | Description |
 |----------|-------------|
 | `get_live_punches()` / `set_live_punches(val)` | Per-punch live Telegram notifications toggle. |
+| `get_notify_device_status()` / `set_notify_device_status(val)` | Device online/offline change alert toggle. |
+| `get_notify_device_stale()` / `set_notify_device_stale(val)` | Device stale (online but no new punch) alert toggle. |
+| `get_notify_mdb_stale()` / `set_notify_mdb_stale(val)` | MDB stale (no new punches) alert toggle. |
 | `get_device_timeout()` / `set_device_timeout(val)` | ZKTeco connection timeout in seconds. |
 | `get_devices()` | Returns the device list from `[devices]` as a list of `{ip, name, sensor_id, port, timeout}` dicts. Supports `ips` comma lists, `ips` IP ranges like `10.20.141.21-10.20.141.29`, and legacy `device_01=...` keys. |
 | `save_devices(devices)` | Writes the full device list back to `[devices]` in `config.ini`. |
@@ -426,6 +430,8 @@ stale_check_interval_mins = 30        # scheduler interval for MDB/device stale 
 [notifications]
 notify_punches       = 0              # 1 = send Telegram message per punch (noisy)
 notify_device_status = 1              # 1 = alert on device online/offline change
+notify_device_stale  = 1              # 1 = alert when device is online but stale
+notify_mdb_stale     = 1              # 1 = alert when MDB has no new punches
 daily_report_hour    = 8              # daily absent report time
 daily_report_minute  = 10
 
@@ -659,6 +665,7 @@ Summary status values:
 | Command | Description |
 |---------|-------------|
 | `/livepunches` | Toggle per-punch live notifications on/off |
+| `/alerts` | Toggle Telegram alert notifications on/off (admin only) |
 | `/editreport` | Interactive panel — configure on-demand `/report` settings (departments, format, template, save dir) |
 | `/editdaily` | Interactive panel — configure scheduled daily report settings (time, days, departments, format, save dir) |
 | `/editemail` | Interactive panel — configure Gmail SMTP email delivery (see below) |

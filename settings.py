@@ -173,7 +173,7 @@ def set_report_save_dir(val: str):
     _save()
 
 
-# ─── Live punch notifications ─────────────────────────────────────────────────
+# ─── Notification toggles ──────────────────────────────────────────────────────
 
 def get_live_punches() -> bool:
     return _cfg.getboolean('notifications', 'notify_punches', fallback=False)
@@ -182,6 +182,36 @@ def get_live_punches() -> bool:
 def set_live_punches(val: bool):
     _ensure('notifications')
     _cfg['notifications']['notify_punches'] = '1' if val else '0'
+    _save()
+
+
+def get_notify_device_status() -> bool:
+    return _cfg.getboolean('notifications', 'notify_device_status', fallback=True)
+
+
+def set_notify_device_status(val: bool):
+    _ensure('notifications')
+    _cfg['notifications']['notify_device_status'] = '1' if val else '0'
+    _save()
+
+
+def get_notify_device_stale() -> bool:
+    return _cfg.getboolean('notifications', 'notify_device_stale', fallback=True)
+
+
+def set_notify_device_stale(val: bool):
+    _ensure('notifications')
+    _cfg['notifications']['notify_device_stale'] = '1' if val else '0'
+    _save()
+
+
+def get_notify_mdb_stale() -> bool:
+    return _cfg.getboolean('notifications', 'notify_mdb_stale', fallback=True)
+
+
+def set_notify_mdb_stale(val: bool):
+    _ensure('notifications')
+    _cfg['notifications']['notify_mdb_stale'] = '1' if val else '0'
     _save()
 
 
